@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Veonex.Core/Veonex.Core.csproj" />
+  <Project Path="Veonex.Game/Veonex.Game.csproj" Id="c0120880-2abb-461a-b81f-2db50c8b7eb7" />
+  <Project Path="Veonex.Mathematics/Veonex.Mathematics.csproj" />
+  <Project Path="Veonex.Render/Veonex.Render.csproj" />
+</Solution>
