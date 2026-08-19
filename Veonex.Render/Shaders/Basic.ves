@@ -1,0 +1,64 @@
+###VERT
+
+#version 450
+
+layout(location = 0) in vec3 Position;
+layout(location = 1) in vec3 Normal;
+
+layout(set = 0, binding = 0) uniform TransformBuffer
+{
+    mat4 MVP;
+};
+
+layout(location = 0) out vec3 FragNormal;
+
+void main()
+{
+    gl_Position =
+        MVP * vec4(Position, 1.0);
+
+    FragNormal = Normal;
+}
+
+###FRAG
+
+#version 450
+
+layout(location = 0) in vec3 FragNormal;
+
+layout(location = 0) out vec4 Color;
+
+void main()
+{
+    vec3 normal =
+        normalize(FragNormal);
+
+    vec3 color;
+
+    if (normal.x > 0.5)
+    {
+        color = vec3(1.0, 0.25, 0.25);
+    }
+    else if (normal.x < -0.5)
+    {
+        color = vec3(0.7, 0.05, 0.05);
+    }
+    else if (normal.y > 0.5)
+    {
+        color = vec3(1.0, 0.55, 0.55);
+    }
+    else if (normal.y < -0.5)
+    {
+        color = vec3(0.45, 0.02, 0.02);
+    }
+    else if (normal.z > 0.5)
+    {
+        color = vec3(1.0, 0.10, 0.10);
+    }
+    else
+    {
+        color = vec3(0.8, 0.12, 0.12);
+    }
+
+    Color = vec4(color, 1.0);
+}

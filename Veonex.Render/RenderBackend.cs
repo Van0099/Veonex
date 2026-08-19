@@ -1,4 +1,5 @@
 ﻿using System.Numerics;
+using System.Runtime.InteropServices;
 using NeoVeldrid;
 using NeoVeldrid.Vk;
 using SDL;
@@ -20,18 +21,18 @@ public sealed unsafe class RenderBackend : IDisposable
     private readonly WindowParameters _parameters;
 
     private readonly SDL_Window* _window;
+
     private readonly GraphicsDevice _graphicsDevice;
     private readonly CommandList _commandList;
 
-    private readonly DeviceBuffer _cubeVertexBuffer;
-    private readonly DeviceBuffer _cubeIndexBuffer;
+    private readonly Shader[] _shaders;
+    private readonly Pipeline _pipeline;
 
-    private readonly Shader[] _cubeShaders;
-    private readonly Pipeline _cubePipeline;
+    private readonly ResourceLayout _transformLayout;
 
-    private readonly CubeVertex[] _cubeVertices;
+    private readonly Dictionary<Guid, MeshBuffer> _meshCache = [];
+    private readonly Dictionary<Guid, TransformResources> _transformCache = [];
 
-    private float _rotation;
     private bool _disposed;
 
     public ResourceFactory Factory =>
@@ -39,46 +40,37 @@ public sealed unsafe class RenderBackend : IDisposable
 
     public bool IsRunning { get; private set; } = true;
 
-    private struct CubeVertex
+    private sealed class TransformResources : IDisposable
     {
-        public Vector3 Position;
-        public Vector3 Color;
+        public DeviceBuffer Buffer { get; }
+        public ResourceSet ResourceSet { get; }
 
-        public CubeVertex(
-            Vector3 position,
-            Vector3 color)
+        public TransformResources(
+            DeviceBuffer buffer,
+            ResourceSet resourceSet)
         {
-            Position = position;
-            Color = color;
+            Buffer = buffer;
+            ResourceSet = resourceSet;
+        }
+
+        public void Dispose()
+        {
+            ResourceSet.Dispose();
+            Buffer.Dispose();
         }
     }
 
-    private static readonly uint[] CubeIndices =
-    [
-        // Front
-        0, 1, 2,
-        2, 3, 0,
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MatrixBuffer
+    {
+        public Matrix4x4 MVP;
 
-        // Back
-        4, 5, 6,
-        6, 7, 4,
-
-        // Left
-        8, 9, 10,
-        10, 11, 8,
-
-        // Right
-        12, 13, 14,
-        14, 15, 12,
-
-        // Top
-        16, 17, 18,
-        18, 19, 16,
-
-        // Bottom
-        20, 21, 22,
-        22, 23, 20
-    ];
+        public MatrixBuffer(
+            Matrix4x4 mvp)
+        {
+            MVP = mvp;
+        }
+    }
 
     public RenderBackend(
         WindowParameters parameters)
@@ -93,174 +85,27 @@ public sealed unsafe class RenderBackend : IDisposable
         _commandList =
             Factory.CreateCommandList();
 
-        _cubeVertices =
-            CreateCubeVertices();
-
-        _cubeVertexBuffer =
-            Factory.CreateBuffer(
-                new BufferDescription(
-                    (uint)(
-                        _cubeVertices.Length *
-                        (sizeof(float) * 6)),
-                    BufferUsage.VertexBuffer));
-
-        _cubeIndexBuffer =
-            Factory.CreateBuffer(
-                new BufferDescription(
-                    (uint)(
-                        CubeIndices.Length *
-                        sizeof(uint)),
-                    BufferUsage.IndexBuffer));
-
-        _graphicsDevice.UpdateBuffer(
-            _cubeVertexBuffer,
-            0,
-            _cubeVertices);
-
-        _graphicsDevice.UpdateBuffer(
-            _cubeIndexBuffer,
-            0,
-            CubeIndices);
+        _transformLayout =
+            Factory.CreateResourceLayout(
+                new ResourceLayoutDescription(
+                    new ResourceLayoutElementDescription(
+                        "MVP",
+                        ResourceKind.UniformBuffer,
+                        ShaderStages.Vertex)));
 
         string shaderPath =
             Path.Combine(
                 AppContext.BaseDirectory,
                 "Shaders",
-                "Cube.ves");
+                "Basic.ves");
 
-        _cubeShaders =
+        _shaders =
             ShaderLoader.Load(
                 Factory,
                 shaderPath);
 
-        _cubePipeline =
-            CreateCubePipeline();
-    }
-
-    private static CubeVertex[] CreateCubeVertices()
-    {
-        Vector3 frontColor =
-            new(1.0f, 0.15f, 0.15f);
-
-        Vector3 backColor =
-            new(0.8f, 0.05f, 0.05f);
-
-        Vector3 leftColor =
-            new(1.0f, 0.30f, 0.10f);
-
-        Vector3 rightColor =
-            new(0.65f, 0.0f, 0.0f);
-
-        Vector3 topColor =
-            new(1.0f, 0.45f, 0.45f);
-
-        Vector3 bottomColor =
-            new(0.45f, 0.02f, 0.02f);
-
-        return
-        [
-            // Front
-            new(
-                new(-1, -1, -1),
-                frontColor),
-
-            new(
-                new( 1, -1, -1),
-                frontColor),
-
-            new(
-                new( 1,  1, -1),
-                frontColor),
-
-            new(
-                new(-1,  1, -1),
-                frontColor),
-
-            // Back
-            new(
-                new( 1, -1,  1),
-                backColor),
-
-            new(
-                new(-1, -1,  1),
-                backColor),
-
-            new(
-                new(-1,  1,  1),
-                backColor),
-
-            new(
-                new( 1,  1,  1),
-                backColor),
-
-            // Left
-            new(
-                new(-1, -1,  1),
-                leftColor),
-
-            new(
-                new(-1, -1, -1),
-                leftColor),
-
-            new(
-                new(-1,  1, -1),
-                leftColor),
-
-            new(
-                new(-1,  1,  1),
-                leftColor),
-
-            // Right
-            new(
-                new(1, -1, -1),
-                rightColor),
-
-            new(
-                new(1, -1,  1),
-                rightColor),
-
-            new(
-                new(1,  1,  1),
-                rightColor),
-
-            new(
-                new(1,  1, -1),
-                rightColor),
-
-            // Top
-            new(
-                new(-1, 1, -1),
-                topColor),
-
-            new(
-                new(1, 1, -1),
-                topColor),
-
-            new(
-                new(1, 1, 1),
-                topColor),
-
-            new(
-                new(-1, 1, 1),
-                topColor),
-
-            // Bottom
-            new(
-                new(-1, -1, 1),
-                bottomColor),
-
-            new(
-                new(1, -1, 1),
-                bottomColor),
-
-            new(
-                new(1, -1, -1),
-                bottomColor),
-
-            new(
-                new(-1, -1, -1),
-                bottomColor)
-        ];
+        _pipeline =
+            CreatePipeline();
     }
 
     private SDL_Window* CreateWindow()
@@ -268,11 +113,8 @@ public sealed unsafe class RenderBackend : IDisposable
         if (!SDL3.SDL_Init(
                 SDL_InitFlags.SDL_INIT_VIDEO))
         {
-            string error =
-                SDL3.SDL_GetError();
-
             throw new InvalidOperationException(
-                $"Failed to initialize SDL3: {error}");
+                $"Failed to initialize SDL3: {SDL3.SDL_GetError()}");
         }
 
         SDL_WindowFlags flags =
@@ -385,51 +227,60 @@ public sealed unsafe class RenderBackend : IDisposable
             (uint)_parameters.Height);
     }
 
-    private Pipeline CreateCubePipeline()
+    private Pipeline CreatePipeline()
     {
-        VertexLayoutDescription vertexLayout =
+        VertexLayoutDescription positionLayout =
             new(
                 new VertexElementDescription(
                     "Position",
                     VertexElementSemantic.Position,
-                    VertexElementFormat.Float3),
+                    VertexElementFormat.Float3));
 
+        VertexLayoutDescription normalLayout =
+            new(
                 new VertexElementDescription(
-                    "Color",
-                    VertexElementSemantic.TextureCoordinate,
+                    "Normal",
+                    VertexElementSemantic.Normal,
                     VertexElementFormat.Float3));
 
         ShaderSetDescription shaderSet =
             new(
                 [
-                    vertexLayout
+                    positionLayout,
+                    normalLayout
                 ],
-                _cubeShaders);
+                _shaders);
 
-        GraphicsPipelineDescription pipelineDescription =
+        RasterizerStateDescription rasterizer =
+            new(
+                FaceCullMode.None,
+                PolygonFillMode.Solid,
+                FrontFace.Clockwise,
+                depthClipEnabled: true,
+                scissorTestEnabled: false);
+
+        DepthStencilStateDescription depthState =
+            new(
+                depthTestEnabled: true,
+                depthWriteEnabled: true,
+                comparisonKind: ComparisonKind.LessEqual);
+
+        GraphicsPipelineDescription description =
             new(
                 BlendStateDescription.SingleOverrideBlend,
-
-                new DepthStencilStateDescription(
-                    depthTestEnabled: true,
-                    depthWriteEnabled: true,
-                    comparisonKind:
-                        ComparisonKind.LessEqual),
-
-                RasterizerStateDescription.Default,
-
+                depthState,
+                rasterizer,
                 PrimitiveTopology.TriangleList,
-
                 shaderSet,
-
-                [],
-
+                [
+                    _transformLayout
+                ],
                 _graphicsDevice
                     .SwapchainFramebuffer
                     .OutputDescription);
 
         return Factory.CreateGraphicsPipeline(
-            pipelineDescription);
+            description);
     }
 
     public void RenderFrame(
@@ -441,9 +292,24 @@ public sealed unsafe class RenderBackend : IDisposable
         if (!IsRunning)
             return;
 
-        _rotation += 0.01f;
+        float aspect =
+            (float)_parameters.Width /
+            _parameters.Height;
 
-        UpdateCubeVertices();
+        Matrix4x4 view =
+            CreateViewMatrix(camera);
+
+        Matrix4x4 projection =
+            Matrix4x4.CreatePerspectiveFieldOfView(
+                (float)(
+                    camera.FieldOfView *
+                    Math.PI /
+                    180.0),
+                aspect,
+                (float)camera.NearClip,
+                (float)camera.FarClip);
+
+        HashSet<Guid> activeTransforms = [];
 
         _commandList.Begin();
 
@@ -460,22 +326,82 @@ public sealed unsafe class RenderBackend : IDisposable
             1.0f);
 
         _commandList.SetPipeline(
-            _cubePipeline);
+            _pipeline);
 
-        _commandList.SetVertexBuffer(
-            0,
-            _cubeVertexBuffer);
+        foreach (Entity entity in scene.Entities)
+        {
+            if (!entity.Has<MeshRenderer>())
+                continue;
 
-        _commandList.SetIndexBuffer(
-            _cubeIndexBuffer,
-            IndexFormat.UInt32);
+            MeshRenderer renderer =
+                entity.Get<MeshRenderer>();
 
-        _commandList.DrawIndexed(
-            (uint)CubeIndices.Length,
-            1,
-            0,
-            0,
-            0);
+            if (!renderer.Visible)
+                continue;
+
+            if (renderer.Mesh == null)
+                continue;
+
+            if (!renderer.Mesh.Data.HasNormals)
+                continue;
+
+            if (!entity.Has<Transform>())
+                continue;
+
+            Transform transform =
+                entity.Get<Transform>();
+
+            MeshBuffer meshBuffer =
+                GetOrCreateMeshBuffer(
+                    renderer.Mesh);
+
+            Matrix4x4 model =
+                CreateModelMatrix(
+                    transform);
+
+            Matrix4x4 mvp =
+                model *
+                view *
+                projection;
+
+            TransformResources resources =
+                GetOrCreateTransformResources(
+                    entity.Id);
+
+            _graphicsDevice.UpdateBuffer(
+                resources.Buffer,
+                0,
+                new MatrixBuffer(mvp));
+
+            activeTransforms.Add(
+                entity.Id);
+
+            _commandList.SetGraphicsResourceSet(
+                0,
+                resources.ResourceSet);
+
+            _commandList.SetVertexBuffer(
+                0,
+                meshBuffer.PositionBuffer);
+
+            if (meshBuffer.NormalBuffer != null)
+            {
+                _commandList.SetVertexBuffer(
+                    1,
+                    meshBuffer.NormalBuffer);
+            }
+
+            _commandList.SetIndexBuffer(
+                meshBuffer.IndexBuffer,
+                IndexFormat.UInt32);
+
+            _commandList.DrawIndexed(
+                meshBuffer.IndexCount,
+                1,
+                0,
+                0,
+                0);
+        }
 
         _commandList.End();
 
@@ -483,63 +409,295 @@ public sealed unsafe class RenderBackend : IDisposable
             _commandList);
 
         _graphicsDevice.SwapBuffers();
+
+        CleanupUnusedTransformResources(
+            activeTransforms);
     }
 
-    private void UpdateCubeVertices()
+    private MeshBuffer GetOrCreateMeshBuffer(
+        Mesh mesh)
     {
-        float aspect =
-            (float)_parameters.Width /
-            _parameters.Height;
-
-        Matrix4x4 rotation =
-            Matrix4x4.CreateRotationY(
-                _rotation) *
-            Matrix4x4.CreateRotationX(
-                _rotation * 0.7f);
-
-        Matrix4x4 view =
-            Matrix4x4.CreateLookAt(
-                new Vector3(0, 0, 5),
-                Vector3.Zero,
-                Vector3.UnitY);
-
-        Matrix4x4 projection =
-            Matrix4x4.CreatePerspectiveFieldOfView(
-                MathF.PI / 3.0f,
-                aspect,
-                0.1f,
-                100.0f);
-
-        Matrix4x4 transform =
-            rotation *
-            view *
-            projection;
-
-        CubeVertex[] transformed =
-            new CubeVertex[_cubeVertices.Length];
-
-        for (int i = 0; i < _cubeVertices.Length; i++)
+        if (_meshCache.TryGetValue(
+            mesh.Id,
+            out MeshBuffer? existing))
         {
-            Vector4 clip =
-                Vector4.Transform(
-                    new Vector4(
-                        _cubeVertices[i].Position,
-                        1.0f),
-                    transform);
-
-            transformed[i] =
-                new CubeVertex(
-                    new Vector3(
-                        clip.X / clip.W,
-                        clip.Y / clip.W,
-                        clip.Z / clip.W),
-                    _cubeVertices[i].Color);
+            return existing;
         }
 
+        MeshBuffer created =
+            CreateMeshBuffer(mesh);
+
+        _meshCache.Add(
+            mesh.Id,
+            created);
+
+        return created;
+    }
+
+    private MeshBuffer CreateMeshBuffer(
+        Mesh mesh)
+    {
+        MeshData data =
+            mesh.Data;
+
+        Vector3[] positions =
+            new Vector3[data.VertexCount];
+
+        for (int i = 0; i < data.VertexCount; i++)
+        {
+            positions[i] =
+                new Vector3(
+                    (float)data.Positions[i].X,
+                    (float)data.Positions[i].Y,
+                    (float)data.Positions[i].Z);
+        }
+
+        DeviceBuffer positionBuffer =
+            Factory.CreateBuffer(
+                new BufferDescription(
+                    (uint)(
+                        data.VertexCount *
+                        sizeof(float) *
+                        3),
+                    BufferUsage.VertexBuffer));
+
         _graphicsDevice.UpdateBuffer(
-            _cubeVertexBuffer,
+            positionBuffer,
             0,
-            transformed);
+            positions);
+
+        DeviceBuffer? normalBuffer = null;
+
+        if (data.HasNormals)
+        {
+            Vector3[] normals =
+                new Vector3[data.VertexCount];
+
+            for (int i = 0; i < data.VertexCount; i++)
+            {
+                normals[i] =
+                    new Vector3(
+                        (float)data.Normals[i].X,
+                        (float)data.Normals[i].Y,
+                        (float)data.Normals[i].Z);
+            }
+
+            normalBuffer =
+                Factory.CreateBuffer(
+                    new BufferDescription(
+                        (uint)(
+                            data.VertexCount *
+                            sizeof(float) *
+                            3),
+                        BufferUsage.VertexBuffer));
+
+            _graphicsDevice.UpdateBuffer(
+                normalBuffer,
+                0,
+                normals);
+        }
+
+        DeviceBuffer? uvBuffer = null;
+
+        if (data.HasUVs)
+        {
+            Vector2[] uvs =
+                new Vector2[data.VertexCount];
+
+            for (int i = 0; i < data.VertexCount; i++)
+            {
+                uvs[i] =
+                    new Vector2(
+                        (float)data.UVs[i].X,
+                        (float)data.UVs[i].Y);
+            }
+
+            uvBuffer =
+                Factory.CreateBuffer(
+                    new BufferDescription(
+                        (uint)(
+                            data.VertexCount *
+                            sizeof(float) *
+                            2),
+                        BufferUsage.VertexBuffer));
+
+            _graphicsDevice.UpdateBuffer(
+                uvBuffer,
+                0,
+                uvs);
+        }
+
+        DeviceBuffer indexBuffer =
+            Factory.CreateBuffer(
+                new BufferDescription(
+                    (uint)(
+                        data.IndexCount *
+                        sizeof(uint)),
+                    BufferUsage.IndexBuffer));
+
+        _graphicsDevice.UpdateBuffer(
+            indexBuffer,
+            0,
+            data.Indices);
+
+        return new MeshBuffer(
+            positionBuffer,
+            indexBuffer,
+            (uint)data.IndexCount,
+            normalBuffer,
+            uvBuffer);
+    }
+
+    private TransformResources
+        GetOrCreateTransformResources(
+            Guid entityId)
+    {
+        if (_transformCache.TryGetValue(
+            entityId,
+            out TransformResources? existing))
+        {
+            return existing;
+        }
+
+        DeviceBuffer buffer =
+            Factory.CreateBuffer(
+                new BufferDescription(
+                    (uint)Marshal.SizeOf<MatrixBuffer>(),
+                    BufferUsage.UniformBuffer));
+
+        ResourceSet resourceSet =
+            Factory.CreateResourceSet(
+                new ResourceSetDescription(
+                    _transformLayout,
+                    buffer));
+
+        TransformResources resources =
+            new(
+                buffer,
+                resourceSet);
+
+        _transformCache.Add(
+            entityId,
+            resources);
+
+        return resources;
+    }
+
+    private void CleanupUnusedTransformResources(
+        HashSet<Guid> activeEntities)
+    {
+        List<Guid>? remove = null;
+
+        foreach (Guid id in _transformCache.Keys)
+        {
+            if (activeEntities.Contains(id))
+                continue;
+
+            remove ??= [];
+
+            remove.Add(id);
+        }
+
+        if (remove == null)
+            return;
+
+        foreach (Guid id in remove)
+        {
+            TransformResources resources =
+                _transformCache[id];
+
+            resources.Dispose();
+
+            _transformCache.Remove(id);
+        }
+    }
+
+    private static Matrix4x4 CreateModelMatrix(
+        Transform transform)
+    {
+        Vector3 position =
+            new(
+                (float)transform.Position.X,
+                (float)transform.Position.Y,
+                (float)transform.Position.Z);
+
+        Vector3 scale =
+            new(
+                (float)transform.Scale.X,
+                (float)transform.Scale.Y,
+                (float)transform.Scale.Z);
+
+        Vector3 rotation =
+            new(
+                (float)transform.Rotation.X,
+                (float)transform.Rotation.Y,
+                (float)transform.Rotation.Z);
+
+        float radiansX =
+            rotation.X *
+            (MathF.PI / 180.0f);
+
+        float radiansY =
+            rotation.Y *
+            (MathF.PI / 180.0f);
+
+        float radiansZ =
+            rotation.Z *
+            (MathF.PI / 180.0f);
+
+        Quaternion quaternion =
+            Quaternion.CreateFromYawPitchRoll(
+                radiansY,
+                radiansX,
+                radiansZ);
+
+        return
+            Matrix4x4.CreateScale(scale) *
+            Matrix4x4.CreateFromQuaternion(quaternion) *
+            Matrix4x4.CreateTranslation(position);
+    }
+
+    private static Matrix4x4 CreateViewMatrix(
+        Camera camera)
+    {
+        Transform transform =
+            camera.Entity.Get<Transform>();
+
+        Vector3 position =
+            new(
+                (float)transform.Position.X,
+                (float)transform.Position.Y,
+                (float)transform.Position.Z);
+
+        Vector3 rotation =
+            new(
+                (float)transform.Rotation.X,
+                (float)transform.Rotation.Y,
+                (float)transform.Rotation.Z);
+
+        Quaternion quaternion =
+            Quaternion.CreateFromYawPitchRoll(
+                rotation.Y *
+                    (MathF.PI / 180.0f),
+                rotation.X *
+                    (MathF.PI / 180.0f),
+                rotation.Z *
+                    (MathF.PI / 180.0f));
+
+        Vector3 forward =
+            Vector3.Transform(
+                Vector3.UnitZ,
+                quaternion);
+
+        Vector3 up =
+            Vector3.Transform(
+                Vector3.UnitY,
+                quaternion);
+
+        return Matrix4x4.CreateLookAt(
+            position,
+            position + forward,
+            up);
     }
 
     private void PumpEvents()
@@ -563,17 +721,33 @@ public sealed unsafe class RenderBackend : IDisposable
 
         _disposed = true;
 
-        _cubePipeline.Dispose();
+        foreach (MeshBuffer meshBuffer
+                 in _meshCache.Values)
+        {
+            meshBuffer.Dispose();
+        }
 
-        foreach (Shader shader in _cubeShaders)
+        _meshCache.Clear();
+
+        foreach (TransformResources resources
+                 in _transformCache.Values)
+        {
+            resources.Dispose();
+        }
+
+        _transformCache.Clear();
+
+        _pipeline.Dispose();
+
+        foreach (Shader shader in _shaders)
         {
             shader.Dispose();
         }
 
-        _cubeVertexBuffer.Dispose();
-        _cubeIndexBuffer.Dispose();
+        _transformLayout.Dispose();
 
         _commandList.Dispose();
+
         _graphicsDevice.Dispose();
 
         if (_window != null)
