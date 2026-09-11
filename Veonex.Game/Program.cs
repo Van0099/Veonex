@@ -83,6 +83,9 @@ cameraTransform.Rotation =
         yaw * 180.0 / Math.PI,
         0.0);
 
+// material
+var mat = new Material("mat", "Basic", new DVector4(0.5, 1, 1, 1));
+
 Mesh cubeMesh =
     CubeMeshTemplate.Create();
 
@@ -104,6 +107,8 @@ MeshRenderer cube1Renderer =
 cube1Renderer.Mesh =
     cubeMesh;
 
+cube1Renderer.Material = mat;
+
 Entity cube2 =
     scene.Add("Cube_2");
 
@@ -121,6 +126,8 @@ MeshRenderer cube2Renderer =
 
 cube2Renderer.Mesh =
     cubeMesh;
+
+cube2Renderer.Material = mat;
 
 
 while (renderer.IsRunning)

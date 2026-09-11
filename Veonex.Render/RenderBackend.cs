@@ -29,18 +29,22 @@ public sealed unsafe class RenderBackend : IDisposable
     private readonly Pipeline _pipeline;
 
     private readonly ResourceLayout _transformLayout;
+	private readonly ResourceLayout _materialLayout;
 
-    private readonly Dictionary<Guid, MeshBuffer> _meshCache = [];
+	private readonly Dictionary<Guid, MeshBuffer> _meshCache = [];
     private readonly Dictionary<Guid, TransformResources> _transformCache = [];
+	private readonly Dictionary<Guid, MaterialResources> _materialCache = [];
 
-    private bool _disposed;
+	private bool _disposed;
 
     public ResourceFactory Factory =>
         _graphicsDevice.ResourceFactory;
 
     public bool IsRunning { get; private set; } = true;
 
-    private sealed class TransformResources : IDisposable
+    // layouts
+
+	private sealed class TransformResources : IDisposable
     {
         public DeviceBuffer Buffer { get; }
         public ResourceSet ResourceSet { get; }
@@ -60,7 +64,29 @@ public sealed unsafe class RenderBackend : IDisposable
         }
     }
 
-    [StructLayout(LayoutKind.Sequential)]
+	private sealed class MaterialResources : IDisposable
+	{
+		public DeviceBuffer Buffer { get; }
+		public ResourceSet ResourceSet { get; }
+
+		public MaterialResources(
+			DeviceBuffer buffer,
+			ResourceSet resourceSet)
+		{
+			Buffer = buffer;
+			ResourceSet = resourceSet;
+		}
+
+		public void Dispose()
+		{
+			ResourceSet.Dispose();
+			Buffer.Dispose();
+		}
+	}
+
+    // buffers
+
+	[StructLayout(LayoutKind.Sequential)]
     private struct MatrixBuffer
     {
         public Matrix4x4 MVP;
@@ -72,7 +98,18 @@ public sealed unsafe class RenderBackend : IDisposable
         }
     }
 
-    public RenderBackend(
+	[StructLayout(LayoutKind.Sequential)]
+	private struct MaterialBuffer
+	{
+		public Vector4 Color;
+
+		public MaterialBuffer(Vector4 color)
+		{
+			Color = color;
+		}
+	}
+
+	public RenderBackend(
         WindowParameters parameters)
     {
         _parameters = parameters;
@@ -93,7 +130,15 @@ public sealed unsafe class RenderBackend : IDisposable
                         ResourceKind.UniformBuffer,
                         ShaderStages.Vertex)));
 
-        string shaderPath =
+		_materialLayout =
+	        Factory.CreateResourceLayout(
+		        new ResourceLayoutDescription(
+			        new ResourceLayoutElementDescription(
+				        "MaterialColor",
+				        ResourceKind.UniformBuffer,
+				        ShaderStages.Fragment)));
+
+		string shaderPath =
             Path.Combine(
                 AppContext.BaseDirectory,
                 "Shaders",
@@ -272,8 +317,9 @@ public sealed unsafe class RenderBackend : IDisposable
                 rasterizer,
                 PrimitiveTopology.TriangleList,
                 shaderSet,
-                [
-                    _transformLayout
+				[
+	                _transformLayout,
+	                _materialLayout
                 ],
                 _graphicsDevice
                     .SwapchainFramebuffer
@@ -342,7 +388,10 @@ public sealed unsafe class RenderBackend : IDisposable
             if (renderer.Mesh == null)
                 continue;
 
-            if (!renderer.Mesh.Data.HasNormals)
+			if (renderer.Material == null)
+				continue;
+
+			if (!renderer.Mesh.Data.HasNormals)
                 continue;
 
             if (!entity.Has<Transform>())
@@ -351,7 +400,19 @@ public sealed unsafe class RenderBackend : IDisposable
             Transform transform =
                 entity.Get<Transform>();
 
-            MeshBuffer meshBuffer =
+			Material material = renderer.Material;
+
+			MaterialResources materialResources =
+				GetOrCreateMaterialResources(material);
+
+			Vector4 color =
+				new(
+					(float)material.Color.X,
+					(float)material.Color.Y,
+					(float)material.Color.Z,
+					(float)material.Color.W);
+
+			MeshBuffer meshBuffer =
                 GetOrCreateMeshBuffer(
                     renderer.Mesh);
 
@@ -373,14 +434,23 @@ public sealed unsafe class RenderBackend : IDisposable
                 0,
                 new MatrixBuffer(mvp));
 
-            activeTransforms.Add(
+			_graphicsDevice.UpdateBuffer(
+				materialResources.Buffer,
+				0,
+				new MaterialBuffer(color));
+
+			activeTransforms.Add(
                 entity.Id);
 
             _commandList.SetGraphicsResourceSet(
                 0,
                 resources.ResourceSet);
 
-            _commandList.SetVertexBuffer(
+			_commandList.SetGraphicsResourceSet(
+				1,
+				materialResources.ResourceSet);
+
+			_commandList.SetVertexBuffer(
                 0,
                 meshBuffer.PositionBuffer);
 
@@ -414,7 +484,39 @@ public sealed unsafe class RenderBackend : IDisposable
             activeTransforms);
     }
 
-    private MeshBuffer GetOrCreateMeshBuffer(
+	private MaterialResources GetOrCreateMaterialResources(
+	Material material)
+	{
+		if (_materialCache.TryGetValue(
+			material.Id,
+			out MaterialResources? existing))
+		{
+			return existing;
+		}
+
+		DeviceBuffer buffer =
+			Factory.CreateBuffer(
+				new BufferDescription(
+					(uint)Marshal.SizeOf<MaterialBuffer>(),
+					BufferUsage.UniformBuffer));
+
+		ResourceSet resourceSet =
+			Factory.CreateResourceSet(
+				new ResourceSetDescription(
+					_materialLayout,
+					buffer));
+
+		MaterialResources resources =
+			new(buffer, resourceSet);
+
+		_materialCache.Add(
+			material.Id,
+			resources);
+
+		return resources;
+	}
+
+	private MeshBuffer GetOrCreateMeshBuffer(
         Mesh mesh)
     {
         if (_meshCache.TryGetValue(

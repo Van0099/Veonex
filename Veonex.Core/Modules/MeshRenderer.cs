@@ -3,9 +3,9 @@
 public sealed class MeshRenderer : Module
 {
     public Mesh? Mesh { get; set; }
+	public Material? Material { get; set; }
 
-
-    public bool Visible { get; set; } = true;
+	public bool Visible { get; set; } = true;
 
 
     public override void OnAdded()

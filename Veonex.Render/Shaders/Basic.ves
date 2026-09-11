@@ -26,39 +26,27 @@ void main()
 
 layout(location = 0) in vec3 FragNormal;
 
-layout(location = 0) out vec4 Color;
+layout(set = 1, binding = 0) uniform MaterialData
+{
+    vec4 MaterialColor;
+};
+
+layout(location = 0) out vec4 FragColor;
 
 void main()
 {
-    vec3 normal =
-        normalize(FragNormal);
+    float light =
+        max(
+            dot(
+                normalize(FragNormal),
+                normalize(vec3(0.4, 0.8, 0.6))
+            ),
+            0.2
+        );
 
-    vec3 color;
-
-    if (normal.x > 0.5)
-    {
-        color = vec3(1.0, 0.25, 0.25);
-    }
-    else if (normal.x < -0.5)
-    {
-        color = vec3(0.7, 0.05, 0.05);
-    }
-    else if (normal.y > 0.5)
-    {
-        color = vec3(1.0, 0.55, 0.55);
-    }
-    else if (normal.y < -0.5)
-    {
-        color = vec3(0.45, 0.02, 0.02);
-    }
-    else if (normal.z > 0.5)
-    {
-        color = vec3(1.0, 0.10, 0.10);
-    }
-    else
-    {
-        color = vec3(0.8, 0.12, 0.12);
-    }
-
-    Color = vec4(color, 1.0);
+    FragColor =
+        vec4(
+            MaterialColor.rgb * light,
+            MaterialColor.a
+        );
 }
