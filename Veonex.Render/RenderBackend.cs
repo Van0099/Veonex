@@ -14,6 +14,7 @@ public sealed class WindowParameters
     public string Title { get; init; } = "Veonex";
     public bool VSync { get; init; } = false;
     public bool Resizable { get; init; } = true;
+	public bool Fullscreen { get; init; } = false;
 }
 
 public sealed unsafe class RenderBackend : IDisposable
@@ -34,6 +35,10 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly Dictionary<Guid, MeshBuffer> _meshCache = [];
     private readonly Dictionary<Guid, TransformResources> _transformCache = [];
 	private readonly Dictionary<Guid, MaterialResources> _materialCache = [];
+
+	private int _renderWidth;
+	private int _renderHeight;
+	private bool _fullscreen;
 
 	private bool _disposed;
 
@@ -116,7 +121,10 @@ public sealed unsafe class RenderBackend : IDisposable
 
         _window = CreateWindow();
 
-        _graphicsDevice =
+		(_renderWidth, _renderHeight) = GetWindowPixelSize();
+		_fullscreen = _parameters.Fullscreen;
+
+		_graphicsDevice =
             CreateGraphicsDevice();
 
         _commandList =
@@ -164,8 +172,10 @@ public sealed unsafe class RenderBackend : IDisposable
 
         SDL_WindowFlags flags =
             SDL_WindowFlags.SDL_WINDOW_VULKAN;
+		if (_parameters.Fullscreen)
+			flags |= SDL_WindowFlags.SDL_WINDOW_FULLSCREEN;
 
-        if (_parameters.Resizable)
+		if (_parameters.Resizable)
         {
             flags |=
                 SDL_WindowFlags.SDL_WINDOW_RESIZABLE;
@@ -199,7 +209,24 @@ public sealed unsafe class RenderBackend : IDisposable
         }
     }
 
-    private GraphicsDevice CreateGraphicsDevice()
+	private (int Width, int Height) GetWindowPixelSize()
+	{
+		int width = 0;
+		int height = 0;
+
+		if (!SDL3.SDL_GetWindowSizeInPixels(
+			_window,
+			&width,
+			&height))
+		{
+			throw new InvalidOperationException(
+				$"Failed to get window pixel size: {SDL3.SDL_GetError()}");
+		}
+
+		return (width, height);
+	}
+
+	private GraphicsDevice CreateGraphicsDevice()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -265,12 +292,18 @@ public sealed unsafe class RenderBackend : IDisposable
                 preferStandardClipSpaceYDirection:
                     true);
 
-        return GraphicsDevice.CreateVulkan(
-            options,
-            surfaceSource,
-            (uint)_parameters.Width,
-            (uint)_parameters.Height);
-    }
+		(int width, int height) =
+	        GetWindowPixelSize();
+
+		_renderWidth = width;
+		_renderHeight = height;
+
+		return GraphicsDevice.CreateVulkan(
+			options,
+			surfaceSource,
+			(uint)width,
+			(uint)height);
+	}
 
     private Pipeline CreatePipeline()
     {
@@ -338,11 +371,20 @@ public sealed unsafe class RenderBackend : IDisposable
         if (!IsRunning)
             return;
 
-        float aspect =
-            (float)_parameters.Width /
-            _parameters.Height;
+		if (_renderWidth <= 0 ||
+	        _renderHeight <= 0)
+		{
+			return;
+		}
 
-        Matrix4x4 view =
+		float aspect =
+			(float)_renderWidth /
+			_renderHeight;
+
+		camera.AspectRatio =
+			aspect;
+
+		Matrix4x4 view =
             CreateViewMatrix(camera);
 
         Matrix4x4 projection =
@@ -802,21 +844,81 @@ public sealed unsafe class RenderBackend : IDisposable
             up);
     }
 
-    private void PumpEvents()
-    {
-        SDL_Event ev;
+	private void PumpEvents()
+	{
+		SDL_Event ev;
 
-        while (SDL3.SDL_PollEvent(&ev))
-        {
-            if (ev.Type ==
-                SDL_EventType.SDL_EVENT_QUIT)
-            {
-                IsRunning = false;
-            }
-        }
-    }
+		while (SDL3.SDL_PollEvent(&ev))
+		{
+			switch (ev.Type)
+			{
+				case SDL_EventType.SDL_EVENT_QUIT:
+					IsRunning = false;
+					break;
 
-    public void Dispose()
+				case SDL_EventType.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+					ResizeRenderTarget(
+						ev.window.data1,
+						ev.window.data2);
+					break;
+
+				case SDL_EventType.SDL_EVENT_KEY_DOWN:
+					if (ev.key.key == SDL_Keycode.SDLK_F11 &&
+						!ev.key.repeat)
+					{
+						ToggleFullscreen();
+					}
+					break;
+			}
+		}
+	}
+
+	private void ResizeRenderTarget(
+	int width,
+	int height)
+	{
+		if (width <= 0 ||
+			height <= 0)
+		{
+			return;
+		}
+
+		if (_renderWidth == width &&
+			_renderHeight == height)
+		{
+			return;
+		}
+
+		_graphicsDevice.ResizeMainWindow(
+			(uint)width,
+			(uint)height);
+
+		_renderWidth = width;
+		_renderHeight = height;
+	}
+
+	public void ToggleFullscreen()
+	{
+		_fullscreen = !_fullscreen;
+
+		SDL3.SDL_SetWindowFullscreen(
+			_window,
+			_fullscreen);
+	}
+
+	public void SetFullscreen(bool fullscreen)
+	{
+		if (_fullscreen == fullscreen)
+			return;
+
+		_fullscreen = fullscreen;
+
+		SDL3.SDL_SetWindowFullscreen(
+			_window,
+			fullscreen);
+	}
+
+	public void Dispose()
     {
         if (_disposed)
             return;
