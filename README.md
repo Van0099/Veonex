@@ -1,7 +1,11 @@
 # Veonex
 
 Veonex is an open-source game engine written in C#.
-- Cross-platform architecture
+
+## Tech Stack
+
+- **Graphics Render:** NeoVeldrid (Silk.NET)
+- **Windowing & Input:** SDL3
 
 ## Status
 
