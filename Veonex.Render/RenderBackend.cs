@@ -35,6 +35,8 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly Dictionary<Guid, MeshBuffer> _meshCache = [];
     private readonly Dictionary<Guid, TransformResources> _transformCache = [];
 	private readonly Dictionary<Guid, MaterialResources> _materialCache = [];
+	private readonly Dictionary<string, Texture> _textureCache =
+	    new(StringComparer.OrdinalIgnoreCase);
 
 	private int _renderWidth;
 	private int _renderHeight;
@@ -106,11 +108,11 @@ public sealed unsafe class RenderBackend : IDisposable
 	[StructLayout(LayoutKind.Sequential)]
 	private struct MaterialBuffer
 	{
-		public Vector4 Color;
+		public Vector4 AlbedoColor;
 
-		public MaterialBuffer(Vector4 color)
+		public MaterialBuffer(Vector4 albedoColor)
 		{
-			Color = color;
+			AlbedoColor = albedoColor;
 		}
 	}
 
@@ -447,12 +449,17 @@ public sealed unsafe class RenderBackend : IDisposable
 			MaterialResources materialResources =
 				GetOrCreateMaterialResources(material);
 
-			Vector4 color =
-				new(
-					(float)material.Color.X,
-					(float)material.Color.Y,
-					(float)material.Color.Z,
-					(float)material.Color.W);
+			if (!string.IsNullOrWhiteSpace(material.Albedo))
+			{
+				GetOrCreateTexture(material.Albedo);
+			}
+
+			Vector4 albedoColor =
+	            new(
+		            (float)material.AlbedoColor.X,
+		            (float)material.AlbedoColor.Y,
+		            (float)material.AlbedoColor.Z,
+		            (float)material.AlbedoColor.W);
 
 			MeshBuffer meshBuffer =
                 GetOrCreateMeshBuffer(
@@ -479,7 +486,7 @@ public sealed unsafe class RenderBackend : IDisposable
 			_graphicsDevice.UpdateBuffer(
 				materialResources.Buffer,
 				0,
-				new MaterialBuffer(color));
+				new MaterialBuffer(albedoColor));
 
 			activeTransforms.Add(
                 entity.Id);
@@ -525,6 +532,31 @@ public sealed unsafe class RenderBackend : IDisposable
         CleanupUnusedTransformResources(
             activeTransforms);
     }
+
+	private Texture GetOrCreateTexture(string path)
+	{
+		string fullPath =
+			Path.GetFullPath(path);
+
+		if (_textureCache.TryGetValue(
+			fullPath,
+			out Texture? existing))
+		{
+			return existing;
+		}
+
+		Texture texture =
+			TextureLoader.Load(
+				Factory,
+				_graphicsDevice,
+				fullPath);
+
+		_textureCache.Add(
+			fullPath,
+			texture);
+
+		return texture;
+	}
 
 	private MaterialResources GetOrCreateMaterialResources(
 	Material material)
@@ -925,7 +957,14 @@ public sealed unsafe class RenderBackend : IDisposable
 
         _disposed = true;
 
-        foreach (MeshBuffer meshBuffer
+		foreach (Texture texture in _textureCache.Values)
+		{
+			texture.Dispose();
+		}
+
+		_textureCache.Clear();
+
+		foreach (MeshBuffer meshBuffer
                  in _meshCache.Values)
         {
             meshBuffer.Dispose();
