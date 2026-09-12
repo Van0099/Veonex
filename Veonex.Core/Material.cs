@@ -7,12 +7,14 @@ public sealed class Material
 	public Guid Id { get; }
 	public string Name { get; set; }
 	public string Shader { get; set; }
-	public DVector4 Color { get; set; }
+	public string? Albedo { get; set; }
+	public DVector4 AlbedoColor { get; set; }
 
 	public Material(
 		string name,
 		string shader,
-		DVector4 color)
+		DVector4 albedoColor,
+		string? albedo = null)
 	{
 		Id = Guid.NewGuid();
 
@@ -26,7 +28,8 @@ public sealed class Material
 				nameof(shader))
 			: shader;
 
-		Color = color;
+		Albedo = albedo;
+		AlbedoColor = albedoColor;
 	}
 
 	public override string ToString() =>
