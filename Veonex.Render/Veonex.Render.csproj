@@ -8,8 +8,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="NeoVeldrid" Version="1.2.0" />
-    <PackageReference Include="NeoVeldrid.SPIRV" Version="1.2.0" />
+    <PackageReference Include="NeoVeldrid" Version="1.2.1" />
+    <PackageReference Include="NeoVeldrid.SPIRV" Version="1.2.1" />
     <PackageReference Include="ppy.SDL3-CS" Version="2026.722.0" />
     <PackageReference Include="SixLabors.ImageSharp" Version="4.1.1" />
   </ItemGroup>

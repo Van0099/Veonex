@@ -11,4 +11,10 @@
     <ProjectReference Include="..\Veonex.Render\Veonex.Render.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="texture.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

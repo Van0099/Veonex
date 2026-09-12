@@ -1,7 +1,6 @@
 ﻿using System.Numerics;
 using System.Runtime.InteropServices;
 using NeoVeldrid;
-using NeoVeldrid.Vk;
 using SDL;
 using Veonex.Core;
 
@@ -29,7 +28,10 @@ public sealed unsafe class RenderBackend : IDisposable
     private readonly Shader[] _shaders;
     private readonly Pipeline _pipeline;
 
-    private readonly ResourceLayout _transformLayout;
+	private readonly Sampler _linearSampler;
+	private readonly Texture _whiteTexture;
+
+	private readonly ResourceLayout _transformLayout;
 	private readonly ResourceLayout _materialLayout;
 
 	private readonly Dictionary<Guid, MeshBuffer> _meshCache = [];
@@ -91,7 +93,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		}
 	}
 
-    // buffers
+	// buffers
 
 	[StructLayout(LayoutKind.Sequential)]
     private struct MatrixBuffer
@@ -129,7 +131,51 @@ public sealed unsafe class RenderBackend : IDisposable
 		_graphicsDevice =
             CreateGraphicsDevice();
 
-        _commandList =
+		_linearSampler =
+	        Factory.CreateSampler(
+		        new SamplerDescription(
+			        SamplerAddressMode.Wrap,
+			        SamplerAddressMode.Wrap,
+			        SamplerAddressMode.Wrap,
+			        SamplerFilter.MinLinear_MagLinear_MipLinear,
+			        null,
+			        16,
+			        0,
+			        16,
+			        0,
+			        SamplerBorderColor.TransparentBlack));
+
+		_whiteTexture =
+	Factory.CreateTexture(
+		TextureDescription.Texture2D(
+			1,
+			1,
+			1,
+			1,
+			PixelFormat.R8_G8_B8_A8_UNorm,
+			TextureUsage.Sampled));
+
+		byte[] whitePixel =
+		[
+			255,
+	255,
+	255,
+	255
+		];
+
+		_graphicsDevice.UpdateTexture(
+			_whiteTexture,
+			whitePixel,
+			0,
+			0,
+			0,
+			1,
+			1,
+			1,
+			0,
+			0);
+
+		_commandList =
             Factory.CreateCommandList();
 
         _transformLayout =
@@ -141,12 +187,22 @@ public sealed unsafe class RenderBackend : IDisposable
                         ShaderStages.Vertex)));
 
 		_materialLayout =
-	        Factory.CreateResourceLayout(
-		        new ResourceLayoutDescription(
-			        new ResourceLayoutElementDescription(
-				        "MaterialColor",
-				        ResourceKind.UniformBuffer,
-				        ShaderStages.Fragment)));
+	Factory.CreateResourceLayout(
+		new ResourceLayoutDescription(
+			new ResourceLayoutElementDescription(
+				"MaterialColor",
+				ResourceKind.UniformBuffer,
+				ShaderStages.Fragment),
+
+			new ResourceLayoutElementDescription(
+				"AlbedoTexture",
+				ResourceKind.TextureReadOnly,
+				ShaderStages.Fragment),
+
+			new ResourceLayoutElementDescription(
+				"AlbedoSampler",
+				ResourceKind.Sampler,
+				ShaderStages.Fragment)));
 
 		string shaderPath =
             Path.Combine(
@@ -275,36 +331,42 @@ public sealed unsafe class RenderBackend : IDisposable
                 "SDL3 did not provide a Win32 HINSTANCE.");
         }
 
-        VkSurfaceSource surfaceSource =
-            VkSurfaceSource.CreateWin32(
-                (nint)hinstance,
-                (nint)hwnd);
-
-        GraphicsDeviceOptions options =
-            new(
-                debug: true,
-                swapchainDepthFormat:
-                    PixelFormat.D24_UNorm_S8_UInt,
-                syncToVerticalBlank:
-                    _parameters.VSync,
-                resourceBindingModel:
-                    ResourceBindingModel.Improved,
-                preferDepthRangeZeroToOne:
-                    true,
-                preferStandardClipSpaceYDirection:
-                    true);
-
 		(int width, int height) =
-	        GetWindowPixelSize();
+		GetWindowPixelSize();
+
+		GraphicsDeviceOptions options =
+	new(
+		debug: true,
+		swapchainDepthFormat:
+			PixelFormat.D24_UNorm_S8_UInt,
+		syncToVerticalBlank:
+			_parameters.VSync,
+		resourceBindingModel:
+			ResourceBindingModel.Improved,
+		preferDepthRangeZeroToOne:
+			true,
+		preferStandardClipSpaceYDirection:
+			true);
 
 		_renderWidth = width;
 		_renderHeight = height;
 
+		SwapchainSource swapchainSource =
+			SwapchainSource.CreateWin32(
+				(nint)hwnd,
+				(nint)hinstance);
+
+		SwapchainDescription swapchainDescription =
+			new(
+				swapchainSource,
+				(uint)width,
+				(uint)height,
+				PixelFormat.D24_UNorm_S8_UInt,
+				_parameters.VSync);
+
 		return GraphicsDevice.CreateVulkan(
 			options,
-			surfaceSource,
-			(uint)width,
-			(uint)height);
+			swapchainDescription);
 	}
 
     private Pipeline CreatePipeline()
@@ -323,15 +385,23 @@ public sealed unsafe class RenderBackend : IDisposable
                     VertexElementSemantic.Normal,
                     VertexElementFormat.Float3));
 
-        ShaderSetDescription shaderSet =
-            new(
-                [
-                    positionLayout,
-                    normalLayout
-                ],
-                _shaders);
+		VertexLayoutDescription uvLayout =
+	        new(
+		        new VertexElementDescription(
+			        "UV",
+			        VertexElementSemantic.TextureCoordinate,
+			        VertexElementFormat.Float2));
 
-        RasterizerStateDescription rasterizer =
+		ShaderSetDescription shaderSet =
+	        new(
+		        [
+			        positionLayout,
+			        normalLayout,
+			        uvLayout
+		        ],
+		        _shaders);
+
+		RasterizerStateDescription rasterizer =
             new(
                 FaceCullMode.None,
                 PolygonFillMode.Solid,
@@ -447,12 +517,7 @@ public sealed unsafe class RenderBackend : IDisposable
 			Material material = renderer.Material;
 
 			MaterialResources materialResources =
-				GetOrCreateMaterialResources(material);
-
-			if (!string.IsNullOrWhiteSpace(material.Albedo))
-			{
-				GetOrCreateTexture(material.Albedo);
-			}
+	            GetOrCreateMaterialResources(material);
 
 			Vector4 albedoColor =
 	            new(
@@ -510,7 +575,14 @@ public sealed unsafe class RenderBackend : IDisposable
                     meshBuffer.NormalBuffer);
             }
 
-            _commandList.SetIndexBuffer(
+			if (meshBuffer.UVBuffer != null)
+			{
+				_commandList.SetVertexBuffer(
+					2,
+					meshBuffer.UVBuffer);
+			}
+
+			_commandList.SetIndexBuffer(
                 meshBuffer.IndexBuffer,
                 IndexFormat.UInt32);
 
@@ -574,14 +646,23 @@ public sealed unsafe class RenderBackend : IDisposable
 					(uint)Marshal.SizeOf<MaterialBuffer>(),
 					BufferUsage.UniformBuffer));
 
+		Texture texture =
+	string.IsNullOrWhiteSpace(material.Albedo)
+		? _whiteTexture
+		: GetOrCreateTexture(material.Albedo);
+
 		ResourceSet resourceSet =
 			Factory.CreateResourceSet(
 				new ResourceSetDescription(
 					_materialLayout,
-					buffer));
+					buffer,
+					texture,
+					_linearSampler));
 
 		MaterialResources resources =
-			new(buffer, resourceSet);
+			new(
+				buffer,
+				resourceSet);
 
 		_materialCache.Add(
 			material.Id,
@@ -991,9 +1072,12 @@ public sealed unsafe class RenderBackend : IDisposable
 
         _commandList.Dispose();
 
-        _graphicsDevice.Dispose();
+		_whiteTexture.Dispose();
+		_linearSampler.Dispose();
 
-        if (_window != null)
+		_graphicsDevice.Dispose();
+
+		if (_window != null)
         {
             SDL3.SDL_DestroyWindow(
                 _window);

@@ -85,7 +85,7 @@ cameraTransform.Rotation =
         0.0);
 
 // material
-var mat = new Material("mat", "Basic", new DVector4(0.53, 0.81, 0.98, 1.0));
+var mat = new Material("mat", "Basic", new DVector4(0.53, 0.81, 0.98, 1.0), "texture.png");
 
 Mesh cubeMesh =
     CubeMeshTemplate.Create();

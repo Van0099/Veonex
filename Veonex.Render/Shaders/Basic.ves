@@ -1,9 +1,9 @@
 ###VERT
-
 #version 450
 
 layout(location = 0) in vec3 Position;
 layout(location = 1) in vec3 Normal;
+layout(location = 2) in vec2 UV;
 
 layout(set = 0, binding = 0) uniform TransformBuffer
 {
@@ -11,42 +11,62 @@ layout(set = 0, binding = 0) uniform TransformBuffer
 };
 
 layout(location = 0) out vec3 FragNormal;
+layout(location = 1) out vec2 FragUV;
 
 void main()
 {
-    gl_Position =
-        MVP * vec4(Position, 1.0);
+    gl_Position = MVP * vec4(Position, 1.0);
 
     FragNormal = Normal;
+    FragUV = UV;
 }
 
 ###FRAG
-
 #version 450
 
-layout(location = 0) in vec3 FragNormal;
-
-layout(set = 1, binding = 0) uniform MaterialData
+layout(set = 1, binding = 0) uniform MaterialBuffer
 {
-    vec4 MaterialColor;
+    vec4 AlbedoColor;
 };
 
-layout(location = 0) out vec4 FragColor;
+layout(set = 1, binding = 1) uniform texture2D AlbedoTexture;
+layout(set = 1, binding = 2) uniform sampler AlbedoSampler;
+
+layout(location = 0) in vec3 FragNormal;
+layout(location = 1) in vec2 FragUV;
+
+layout(location = 0) out vec4 OutColor;
 
 void main()
 {
-    float light =
-        max(
-            dot(
-                normalize(FragNormal),
-                normalize(vec3(0.4, 0.8, 0.6))
-            ),
-            0.2
-        );
+    vec3 normal =
+        normalize(FragNormal);
 
-    FragColor =
+    vec3 lightDirection =
+        normalize(vec3(-0.5, 1.0, -0.75));
+
+    float diffuse =
+        max(
+            dot(normal, lightDirection),
+            0.0);
+
+    float lighting =
+        0.2 +
+        diffuse * 0.8;
+
+    vec4 textureColor =
+        texture(
+            sampler2D(
+                AlbedoTexture,
+                AlbedoSampler),
+            FragUV);
+
+    vec4 finalColor =
+        textureColor *
+        AlbedoColor;
+
+    OutColor =
         vec4(
-            MaterialColor.rgb * light,
-            MaterialColor.a
-        );
+            finalColor.rgb * lighting,
+            finalColor.a);
 }
