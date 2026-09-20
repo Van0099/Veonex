@@ -87,46 +87,46 @@ public static class CubeMeshTemplate
             new( 0, -1,  0)
         ];
 
-        DVector2[] uvs =
+		DVector2[] uvs =
         [
             // Front
-            new(0, 0),
-            new(1, 0),
-            new(1, 1),
             new(0, 1),
+	        new(1, 1),
+	        new(1, 0),
+	        new(0, 0),
 
             // Back
-            new(0, 0),
-            new(1, 0),
-            new(1, 1),
             new(0, 1),
+	        new(1, 1),
+	        new(1, 0),
+	        new(0, 0),
 
             // Left
-            new(0, 0),
-            new(1, 0),
-            new(1, 1),
             new(0, 1),
+	        new(1, 1),
+	        new(1, 0),
+	        new(0, 0),
 
             // Right
-            new(0, 0),
-            new(1, 0),
-            new(1, 1),
             new(0, 1),
+	        new(1, 1),
+	        new(1, 0),
+	        new(0, 0),
 
             // Top
-            new(0, 0),
-            new(1, 0),
-            new(1, 1),
             new(0, 1),
+	        new(1, 1),
+	        new(1, 0),
+	        new(0, 0),
 
             // Bottom
-            new(0, 0),
-            new(1, 0),
-            new(1, 1),
-            new(0, 1)
+            new(0, 1),
+	        new(1, 1),
+	        new(1, 0),
+	        new(0, 0)
         ];
 
-        uint[] indices =
+		uint[] indices =
         [
             // Front
             0, 1, 2,

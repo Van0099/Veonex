@@ -10,7 +10,7 @@ WindowParameters parameters = new()
     Title = "Veonex",
     VSync = false,
     Resizable = true,
-    Fullscreen = false
+    Fullscreen = true
 };
 
 using RenderBackend renderer =
@@ -85,7 +85,7 @@ cameraTransform.Rotation =
         0.0);
 
 // material
-var mat = new Material("mat", "Basic", new DVector4(0.53, 0.81, 0.98, 1.0), "texture.png");
+var mat = new Material("mat", "Basic", new DVector4(1, 1, 1, 1), "prototype.png");
 
 Mesh cubeMesh =
     CubeMeshTemplate.Create();
