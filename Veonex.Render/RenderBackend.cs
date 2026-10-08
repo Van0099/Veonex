@@ -28,6 +28,13 @@ public sealed unsafe class RenderBackend : IDisposable
     private readonly Shader[] _shaders;
     private readonly Pipeline _pipeline;
 
+	private readonly Shader[] _skyShaders;
+	private readonly Pipeline _skyPipeline;
+
+	private readonly ResourceLayout _skyLayout;
+	private readonly DeviceBuffer _skyBuffer;
+	private readonly ResourceSet _skyResourceSet;
+
 	private readonly Sampler _linearSampler;
 	private readonly Texture _whiteTexture;
 
@@ -113,6 +120,19 @@ public sealed unsafe class RenderBackend : IDisposable
 		public MaterialBuffer(Vector4 albedoColor)
 		{
 			AlbedoColor = albedoColor;
+		}
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
+	private struct SkyBuffer
+	{
+		public Matrix4x4 InverseViewProjection;
+
+		public SkyBuffer(
+			Matrix4x4 inverseViewProjection)
+		{
+			InverseViewProjection =
+				inverseViewProjection;
 		}
 	}
 
@@ -202,6 +222,26 @@ public sealed unsafe class RenderBackend : IDisposable
 				ResourceKind.Sampler,
 				ShaderStages.Fragment)));
 
+		_skyLayout =
+	Factory.CreateResourceLayout(
+		new ResourceLayoutDescription(
+			new ResourceLayoutElementDescription(
+				"SkyBuffer",
+				ResourceKind.UniformBuffer,
+				ShaderStages.Fragment)));
+
+		_skyBuffer =
+			Factory.CreateBuffer(
+				new BufferDescription(
+					(uint)Marshal.SizeOf<SkyBuffer>(),
+					BufferUsage.UniformBuffer));
+
+		_skyResourceSet =
+			Factory.CreateResourceSet(
+				new ResourceSetDescription(
+					_skyLayout,
+					_skyBuffer));
+
 		string shaderPath =
             Path.Combine(
                 AppContext.BaseDirectory,
@@ -213,9 +253,23 @@ public sealed unsafe class RenderBackend : IDisposable
                 Factory,
                 shaderPath);
 
-        _pipeline =
+		string skyShaderPath =
+	    Path.Combine(
+		    AppContext.BaseDirectory,
+		    "Shaders",
+		    "Sky.ves");
+
+		_skyShaders =
+			ShaderLoader.Load(
+				Factory,
+				skyShaderPath);
+
+		_pipeline =
             CreatePipeline();
-    }
+
+		_skyPipeline =
+	        CreateSkyPipeline();
+	}
 
     private SDL_Window* CreateWindow()
     {
@@ -423,7 +477,46 @@ public sealed unsafe class RenderBackend : IDisposable
             description);
     }
 
-    public void RenderFrame(
+	private Pipeline CreateSkyPipeline()
+	{
+		ShaderSetDescription shaderSet =
+			new(
+				[],
+				_skyShaders);
+
+		RasterizerStateDescription rasterizer =
+			new(
+				FaceCullMode.None,
+				PolygonFillMode.Solid,
+				FrontFace.Clockwise,
+				depthClipEnabled: false,
+				scissorTestEnabled: false);
+
+		DepthStencilStateDescription depthState =
+			new(
+				depthTestEnabled: false,
+				depthWriteEnabled: false,
+				comparisonKind: ComparisonKind.Always);
+
+		GraphicsPipelineDescription description =
+			new(
+				BlendStateDescription.SingleOverrideBlend,
+				depthState,
+				rasterizer,
+				PrimitiveTopology.TriangleList,
+				shaderSet,
+				[
+					_skyLayout
+				],
+				_graphicsDevice
+					.SwapchainFramebuffer
+					.OutputDescription);
+
+		return Factory.CreateGraphicsPipeline(
+			description);
+	}
+
+	public void RenderFrame(
         Scene scene,
         Camera camera)
     {
@@ -453,26 +546,53 @@ public sealed unsafe class RenderBackend : IDisposable
                 (float)camera.NearClip,
                 (float)camera.FarClip);
 
-        HashSet<Guid> activeTransforms = [];
+		Matrix4x4 viewProjection =
+	        view *
+	        projection;
 
-        _commandList.Begin();
+		        if (!Matrix4x4.Invert(
+				        viewProjection,
+				        out Matrix4x4 inverseViewProjection))
+		        {
+			        return;
+		        }
 
-        _commandList.SetFramebuffer(
-            _graphicsDevice.SwapchainFramebuffer);
+		HashSet<Guid> activeTransforms = [];
 
-        _commandList.SetFullViewports();
+		_commandList.Begin();
 
-        _commandList.ClearColorTarget(
-            0,
-            RgbaFloat.Black);
+		_commandList.SetFramebuffer(
+			_graphicsDevice.SwapchainFramebuffer);
 
-        _commandList.ClearDepthStencil(
-            1.0f);
+		_commandList.SetFullViewports();
 
-        _commandList.SetPipeline(
-            _pipeline);
+		_commandList.ClearColorTarget(
+			0,
+			RgbaFloat.Black);
 
-        foreach (Entity entity in scene.Entities)
+		_commandList.ClearDepthStencil(
+			1.0f);
+
+		_graphicsDevice.UpdateBuffer(
+	        _skyBuffer,
+	        0,
+	        new SkyBuffer(
+		        inverseViewProjection));
+
+		_commandList.SetPipeline(
+			_skyPipeline);
+
+		_commandList.SetGraphicsResourceSet(
+			0,
+			_skyResourceSet);
+
+		_commandList.Draw(
+			3);
+
+		_commandList.SetPipeline(
+			_pipeline);
+
+		foreach (Entity entity in scene.Entities)
         {
             if (!entity.Has<MeshRenderer>())
                 continue;
@@ -1029,6 +1149,18 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_whiteTexture.Dispose();
 		_linearSampler.Dispose();
+
+		_skyResourceSet.Dispose();
+		_skyBuffer.Dispose();
+
+		_skyPipeline.Dispose();
+
+		foreach (Shader shader in _skyShaders)
+		{
+			shader.Dispose();
+		}
+
+		_skyLayout.Dispose();
 
 		_graphicsDevice.Dispose();
 

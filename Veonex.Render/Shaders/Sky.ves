@@ -1,0 +1,117 @@
+###VERT
+#version 450
+
+layout(location = 0) out vec2 FragUV;
+
+void main()
+{
+    vec2 positions[3] = vec2[](
+        vec2(-1.0, -1.0),
+        vec2( 3.0, -1.0),
+        vec2(-1.0,  3.0)
+    );
+
+    vec2 position =
+        positions[gl_VertexIndex];
+
+    gl_Position =
+        vec4(
+            position,
+            0.0,
+            1.0);
+
+    FragUV =
+        position * 0.5 +
+        0.5;
+}
+
+###FRAG
+#version 450
+
+layout(set = 0, binding = 0) uniform SkyBuffer
+{
+    mat4 InverseViewProjection;
+};
+
+layout(location = 0) in vec2 FragUV;
+
+layout(location = 0) out vec4 OutColor;
+
+void main()
+{
+    vec4 nearPoint =
+        InverseViewProjection *
+        vec4(
+            FragUV * 2.0 - 1.0,
+            0.0,
+            1.0);
+
+    vec4 farPoint =
+        InverseViewProjection *
+        vec4(
+            FragUV * 2.0 - 1.0,
+            1.0,
+            1.0);
+
+    nearPoint /=
+        nearPoint.w;
+
+    farPoint /=
+        farPoint.w;
+
+    vec3 direction =
+        normalize(
+            farPoint.xyz -
+            nearPoint.xyz);
+
+    float height =
+        direction.y;
+
+    vec3 gray =
+        vec3(
+            0.28,
+            0.28,
+            0.30);
+
+    vec3 orange =
+        vec3(
+            0.90,
+            0.42,
+            0.10);
+
+    vec3 indigo =
+        vec3(
+            0.12,
+            0.08,
+            0.32);
+
+    float orangeFactor =
+        smoothstep(
+            -0.15,
+            0.15,
+            height);
+
+    vec3 color =
+        mix(
+            gray,
+            orange,
+            orangeFactor);
+
+    float indigoFactor =
+        smoothstep(
+            0.15,
+            0.75,
+            height);
+
+    color =
+        mix(
+            color,
+            indigo,
+            indigoFactor);
+
+
+    OutColor =
+        vec4(
+            color,
+            1.0);
+}
