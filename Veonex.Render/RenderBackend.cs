@@ -51,6 +51,8 @@ public sealed unsafe class RenderBackend : IDisposable
 	private int _renderHeight;
 	private bool _fullscreen;
 
+	public bool MouseCaptured { get; private set; }
+
 	private bool _disposed;
 
     public ResourceFactory Factory =>
@@ -1104,6 +1106,22 @@ public sealed unsafe class RenderBackend : IDisposable
 		SDL3.SDL_SetWindowFullscreen(
 			_window,
 			fullscreen);
+	}
+
+	public void SetMouseCapture(bool captured)
+	{
+		if (MouseCaptured == captured)
+			return;
+
+		if (!SDL3.SDL_SetWindowRelativeMouseMode(
+			_window,
+			captured))
+		{
+			throw new InvalidOperationException(
+				$"Failed to change mouse capture mode: {SDL3.SDL_GetError()}");
+		}
+
+		MouseCaptured = captured;
 	}
 
 	public void Dispose()

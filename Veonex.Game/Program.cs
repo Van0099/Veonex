@@ -1,4 +1,5 @@
 ﻿using SDL;
+using System.Diagnostics;
 using Veonex.Core;
 using Veonex.Game;
 using Veonex.Input;
@@ -14,6 +15,10 @@ if (!SDL3.SDL_Init(
 
 try
 {
+	// ============================================================
+	// Window
+	// ============================================================
+
 	WindowParameters parameters = new()
 	{
 		Width = 1280,
@@ -52,65 +57,50 @@ try
 	Camera camera =
 		cameraEntity.Add<Camera>();
 
-	camera.AspectRatio =
-		(double)parameters.Width /
-		parameters.Height;
-
-
-	// Camera position
-
 	cameraTransform.Position =
 		new DVector3(
 			0,
 			0,
 			8);
 
+	camera.AspectRatio =
+		(double)parameters.Width /
+		parameters.Height;
 
-	// Camera looks towards the origin
 
-	DVector3 target =
-		DVector3.Zero;
+	// ============================================================
+	// Camera controller
+	// ============================================================
 
-	DVector3 direction =
-		target -
-		cameraTransform.Position;
-
-	direction =
-		direction.Normalized();
-
-	double horizontalLength =
-		Math.Sqrt(
-			direction.X * direction.X +
-			direction.Z * direction.Z);
-
-	double yaw =
-		Math.Atan2(
-			direction.X,
-			direction.Z);
-
-	double pitch =
-		Math.Atan2(
-			-direction.Y,
-			horizontalLength);
-
-	cameraTransform.Rotation =
-		new DVector3(
-			pitch * 180.0 / Math.PI,
-			yaw * 180.0 / Math.PI,
-			0.0);
+	CameraController cameraController =
+		new(
+			camera,
+			input,
+			renderer,
+			DVector3.Zero,
+			moveSpeed: 5.0,
+			mouseSensitivity: 0.15);
 
 
 	// ============================================================
 	// Material
 	// ============================================================
 
-	var mat =
-		new Material(
+	Material material =
+		new(
 			"mat",
 			"Basic",
-			new DVector4(1, 1, 1, 1),
+			new DVector4(
+				1,
+				1,
+				1,
+				1),
 			"prototype.png");
 
+
+	// ============================================================
+	// Cube mesh
+	// ============================================================
 
 	Mesh cubeMesh =
 		CubeMeshTemplate.Create();
@@ -133,13 +123,13 @@ try
 			0);
 
 	MeshRenderer cube1Renderer =
-		cube1.Add<MeshRenderer>();
+			cube1.Add<MeshRenderer>();
 
 	cube1Renderer.Mesh =
 		cubeMesh;
 
 	cube1Renderer.Material =
-		mat;
+		material;
 
 
 	// ============================================================
@@ -165,7 +155,20 @@ try
 		cubeMesh;
 
 	cube2Renderer.Material =
-		mat;
+		material;
+
+
+	// ============================================================
+	// Timing
+	// ============================================================
+
+	const double maxDeltaTime = 0.05;
+
+	Stopwatch stopwatch =
+		Stopwatch.StartNew();
+
+	double previousTime =
+		stopwatch.Elapsed.TotalSeconds;
 
 
 	// ============================================================
@@ -174,10 +177,35 @@ try
 
 	while (!input.QuitRequested)
 	{
+		double currentTime =
+			stopwatch.Elapsed.TotalSeconds;
+
+		double deltaTime =
+			currentTime -
+			previousTime;
+
+		previousTime =
+			currentTime;
+
+		deltaTime =
+			Math.Min(
+				deltaTime,
+				maxDeltaTime);
+
+
+		// --------------------------------------------------------
+		// Input
+		// --------------------------------------------------------
+
 		input.Update();
 
 		if (input.QuitRequested)
 			break;
+
+
+		// --------------------------------------------------------
+		// Resize
+		// --------------------------------------------------------
 
 		if (input.WindowSizeChanged)
 		{
@@ -186,11 +214,29 @@ try
 				input.WindowHeight);
 		}
 
+
+		// --------------------------------------------------------
+		// Fullscreen
+		// --------------------------------------------------------
+
 		if (input.IsKeyPressed(
 			SDL_Scancode.SDL_SCANCODE_F11))
 		{
 			renderer.ToggleFullscreen();
 		}
+
+
+		// --------------------------------------------------------
+		// Camera
+		// --------------------------------------------------------
+
+		cameraController.Update(
+			deltaTime);
+
+
+		// --------------------------------------------------------
+		// Render
+		// --------------------------------------------------------
 
 		renderer.RenderFrame(
 			scene,
