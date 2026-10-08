@@ -10,7 +10,7 @@ WindowParameters parameters = new()
     Title = "Veonex",
     VSync = false,
     Resizable = true,
-    Fullscreen = true
+    Fullscreen = false
 };
 
 using RenderBackend renderer =
