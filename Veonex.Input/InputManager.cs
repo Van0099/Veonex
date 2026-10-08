@@ -10,10 +10,18 @@ public sealed unsafe class InputManager
 
 	public bool QuitRequested { get; private set; }
 
+	public bool WindowSizeChanged { get; private set; }
+
+	public int WindowWidth { get; private set; }
+
+	public int WindowHeight { get; private set; }
+
 	public void Update()
 	{
 		_pressed.Clear();
 		_released.Clear();
+
+		WindowSizeChanged = false;
 
 		SDL_Event ev;
 
@@ -31,6 +39,12 @@ public sealed unsafe class InputManager
 
 				case SDL_EventType.SDL_EVENT_KEY_UP:
 					HandleKeyUp(ev.key);
+					break;
+
+				case SDL_EventType.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+					WindowWidth = ev.window.data1;
+					WindowHeight = ev.window.data2;
+					WindowSizeChanged = true;
 					break;
 
 				case SDL_EventType.SDL_EVENT_WINDOW_FOCUS_LOST:

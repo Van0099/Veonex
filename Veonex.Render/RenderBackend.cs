@@ -49,8 +49,6 @@ public sealed unsafe class RenderBackend : IDisposable
     public ResourceFactory Factory =>
         _graphicsDevice.ResourceFactory;
 
-    public bool IsRunning { get; private set; } = true;
-
     // layouts
 
 	private sealed class TransformResources : IDisposable
@@ -221,13 +219,6 @@ public sealed unsafe class RenderBackend : IDisposable
 
     private SDL_Window* CreateWindow()
     {
-        if (!SDL3.SDL_Init(
-                SDL_InitFlags.SDL_INIT_VIDEO))
-        {
-            throw new InvalidOperationException(
-                $"Failed to initialize SDL3: {SDL3.SDL_GetError()}");
-        }
-
         SDL_WindowFlags flags =
             SDL_WindowFlags.SDL_WINDOW_VULKAN;
 		if (_parameters.Fullscreen)
@@ -252,18 +243,16 @@ public sealed unsafe class RenderBackend : IDisposable
                     _parameters.Height,
                     flags);
 
-            if (window == null)
-            {
-                string error =
-                    SDL3.SDL_GetError();
+			if (window == null)
+			{
+				string error =
+					SDL3.SDL_GetError();
 
-                SDL3.SDL_Quit();
+				throw new InvalidOperationException(
+					$"Failed to create SDL3 window: {error}");
+			}
 
-                throw new InvalidOperationException(
-                    $"Failed to create SDL3 window: {error}");
-            }
-
-            return window;
+			return window;
         }
     }
 
@@ -438,11 +427,6 @@ public sealed unsafe class RenderBackend : IDisposable
         Scene scene,
         Camera camera)
     {
-        PumpEvents();
-
-        if (!IsRunning)
-            return;
-
 		if (_renderWidth <= 0 ||
 	        _renderHeight <= 0)
 		{
@@ -957,36 +941,7 @@ public sealed unsafe class RenderBackend : IDisposable
             up);
     }
 
-	private void PumpEvents()
-	{
-		SDL_Event ev;
-
-		while (SDL3.SDL_PollEvent(&ev))
-		{
-			switch (ev.Type)
-			{
-				case SDL_EventType.SDL_EVENT_QUIT:
-					IsRunning = false;
-					break;
-
-				case SDL_EventType.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-					ResizeRenderTarget(
-						ev.window.data1,
-						ev.window.data2);
-					break;
-
-				case SDL_EventType.SDL_EVENT_KEY_DOWN:
-					if (ev.key.key == SDL_Keycode.SDLK_F11 &&
-						!ev.key.repeat)
-					{
-						ToggleFullscreen();
-					}
-					break;
-			}
-		}
-	}
-
-	private void ResizeRenderTarget(
+	public void ResizeRenderTarget(
 	int width,
 	int height)
 	{
@@ -1082,7 +1037,5 @@ public sealed unsafe class RenderBackend : IDisposable
             SDL3.SDL_DestroyWindow(
                 _window);
         }
-
-        SDL3.SDL_Quit();
     }
 }
