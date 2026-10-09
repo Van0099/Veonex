@@ -47,6 +47,7 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly Dictionary<Guid, MaterialResources> _materialCache = [];
 	private readonly Dictionary<string, Texture> _textureCache =
 	    new(StringComparer.OrdinalIgnoreCase);
+	private readonly Dictionary<Guid, MeshBounds> _meshBoundsCache = [];
 
 	private int _renderWidth;
 	private int _renderHeight;
@@ -136,6 +137,40 @@ public sealed unsafe class RenderBackend : IDisposable
 		{
 			InverseViewProjection =
 				inverseViewProjection;
+		}
+	}
+
+	private readonly struct MeshBounds
+	{
+		public Vector3 Center { get; }
+		public float Radius { get; }
+
+		public MeshBounds(Vector3 center, float radius)
+		{
+			Center = center;
+			Radius = radius;
+		}
+	}
+
+	private readonly struct FrustumPlane
+	{
+		public Vector3 Normal { get; }
+		public float Distance { get; }
+
+		public FrustumPlane(Vector3 normal, float distance)
+		{
+			float length = normal.Length();
+
+			if (length > 0.000001f)
+			{
+				Normal = normal / length;
+				Distance = distance / length;
+			}
+			else
+			{
+				Normal = normal;
+				Distance = distance;
+			}
 		}
 	}
 
@@ -449,7 +484,7 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		RasterizerStateDescription rasterizer =
             new(
-                FaceCullMode.None,
+				FaceCullMode.Back,
                 PolygonFillMode.Solid,
                 FrontFace.Clockwise,
                 depthClipEnabled: true,
@@ -560,6 +595,9 @@ public sealed unsafe class RenderBackend : IDisposable
 			        return;
 		        }
 
+		FrustumPlane[] frustumPlanes =
+		CreateFrustumPlanes(viewProjection);
+
 		HashSet<Guid> activeTransforms = [];
 
 		_commandList.Begin();
@@ -618,69 +656,89 @@ public sealed unsafe class RenderBackend : IDisposable
             if (!entity.Has<Transform>())
                 continue;
 
-            Transform transform =
-                entity.Get<Transform>();
+			Transform transform = entity.Get<Transform>();
+
+			activeTransforms.Add(entity.Id);
+
+			Matrix4x4 model = CreateModelMatrix(transform);
+
+			MeshBounds bounds =
+				GetOrCreateMeshBounds(renderer.Mesh);
+
+			Vector3 worldCenter =
+				Vector3.Transform(bounds.Center, model);
+
+			Vector3 scale = new(
+				(float)transform.Scale.X,
+				(float)transform.Scale.Y,
+				(float)transform.Scale.Z);
+
+			float maxScale = MathF.Max(
+				MathF.Abs(scale.X),
+				MathF.Max(
+					MathF.Abs(scale.Y),
+					MathF.Abs(scale.Z)));
+
+			float worldRadius = bounds.Radius * maxScale;
+
+			if (!IsSphereVisible(
+				worldCenter,
+				worldRadius,
+				frustumPlanes))
+			{
+				continue;
+			}
 
 			Material material = renderer.Material;
 
 			MaterialResources materialResources =
-	            GetOrCreateMaterialResources(material);
+				GetOrCreateMaterialResources(material);
 
-			Vector4 albedoColor =
-	            new(
-		            (float)material.AlbedoColor.X,
-		            (float)material.AlbedoColor.Y,
-		            (float)material.AlbedoColor.Z,
-		            (float)material.AlbedoColor.W);
+			Vector4 albedoColor = new(
+				(float)material.AlbedoColor.X,
+				(float)material.AlbedoColor.Y,
+				(float)material.AlbedoColor.Z,
+				(float)material.AlbedoColor.W);
 
 			MeshBuffer meshBuffer =
-                GetOrCreateMeshBuffer(
-                    renderer.Mesh);
+				GetOrCreateMeshBuffer(renderer.Mesh);
 
-            Matrix4x4 model =
-                CreateModelMatrix(
-                    transform);
+			Matrix4x4 mvp =
+				model *
+				view *
+				projection;
 
-            Matrix4x4 mvp =
-                model *
-                view *
-                projection;
+			TransformResources resources =
+				GetOrCreateTransformResources(entity.Id);
 
-            TransformResources resources =
-                GetOrCreateTransformResources(
-                    entity.Id);
-
-            _graphicsDevice.UpdateBuffer(
-                resources.Buffer,
-                0,
-                new MatrixBuffer(mvp));
+			_graphicsDevice.UpdateBuffer(
+				resources.Buffer,
+				0,
+				new MatrixBuffer(mvp));
 
 			_graphicsDevice.UpdateBuffer(
 				materialResources.Buffer,
 				0,
 				new MaterialBuffer(albedoColor));
 
-			activeTransforms.Add(
-                entity.Id);
-
-            _commandList.SetGraphicsResourceSet(
-                0,
-                resources.ResourceSet);
+			_commandList.SetGraphicsResourceSet(
+				0,
+				resources.ResourceSet);
 
 			_commandList.SetGraphicsResourceSet(
 				1,
 				materialResources.ResourceSet);
 
 			_commandList.SetVertexBuffer(
-                0,
-                meshBuffer.PositionBuffer);
+				0,
+				meshBuffer.PositionBuffer);
 
-            if (meshBuffer.NormalBuffer != null)
-            {
-                _commandList.SetVertexBuffer(
-                    1,
-                    meshBuffer.NormalBuffer);
-            }
+			if (meshBuffer.NormalBuffer != null)
+			{
+				_commandList.SetVertexBuffer(
+					1,
+					meshBuffer.NormalBuffer);
+			}
 
 			if (meshBuffer.UVBuffer != null)
 			{
@@ -690,16 +748,16 @@ public sealed unsafe class RenderBackend : IDisposable
 			}
 
 			_commandList.SetIndexBuffer(
-                meshBuffer.IndexBuffer,
-                IndexFormat.UInt32);
+				meshBuffer.IndexBuffer,
+				IndexFormat.UInt32);
 
-            _commandList.DrawIndexed(
-                meshBuffer.IndexCount,
-                1,
-                0,
-                0,
-                0);
-        }
+			_commandList.DrawIndexed(
+				meshBuffer.IndexCount,
+				1,
+				0,
+				0,
+				0);
+		}
 
         _commandList.End();
 
@@ -798,7 +856,68 @@ public sealed unsafe class RenderBackend : IDisposable
         return created;
     }
 
-    private MeshBuffer CreateMeshBuffer(
+	private MeshBounds GetOrCreateMeshBounds(Mesh mesh)
+	{
+		if (_meshBoundsCache.TryGetValue(
+			mesh.Id,
+			out MeshBounds existing))
+		{
+			return existing;
+		}
+
+		MeshData data = mesh.Data;
+
+		if (data.VertexCount == 0)
+		{
+			MeshBounds emptyBounds = new(Vector3.Zero, 0f);
+			_meshBoundsCache.Add(mesh.Id, emptyBounds);
+			return emptyBounds;
+		}
+
+		Vector3 firstPosition = new(
+			(float)data.Positions[0].X,
+			(float)data.Positions[0].Y,
+			(float)data.Positions[0].Z);
+
+		Vector3 min = firstPosition;
+		Vector3 max = firstPosition;
+
+		for (int i = 1; i < data.VertexCount; i++)
+		{
+			Vector3 position = new(
+				(float)data.Positions[i].X,
+				(float)data.Positions[i].Y,
+				(float)data.Positions[i].Z);
+
+			min = Vector3.Min(min, position);
+			max = Vector3.Max(max, position);
+		}
+
+		Vector3 center = (min + max) * 0.5f;
+		float radiusSquared = 0f;
+
+		for (int i = 0; i < data.VertexCount; i++)
+		{
+			Vector3 position = new(
+				(float)data.Positions[i].X,
+				(float)data.Positions[i].Y,
+				(float)data.Positions[i].Z);
+
+			radiusSquared = MathF.Max(
+				radiusSquared,
+				Vector3.DistanceSquared(center, position));
+		}
+
+		MeshBounds bounds = new(
+			center,
+			MathF.Sqrt(radiusSquared));
+
+		_meshBoundsCache.Add(mesh.Id, bounds);
+
+		return bounds;
+	}
+
+	private MeshBuffer CreateMeshBuffer(
         Mesh mesh)
     {
         MeshData data =
@@ -912,7 +1031,80 @@ public sealed unsafe class RenderBackend : IDisposable
             uvBuffer);
     }
 
-    private TransformResources
+	private static FrustumPlane[] CreateFrustumPlanes(
+	Matrix4x4 matrix)
+	{
+		return
+		[
+			// Left
+			new FrustumPlane(
+			new Vector3(
+				matrix.M11 + matrix.M14,
+				matrix.M21 + matrix.M24,
+				matrix.M31 + matrix.M34),
+			matrix.M41 + matrix.M44),
+
+        // Right
+        new FrustumPlane(
+			new Vector3(
+				matrix.M14 - matrix.M11,
+				matrix.M24 - matrix.M21,
+				matrix.M34 - matrix.M31),
+			matrix.M44 - matrix.M41),
+
+        // Bottom
+        new FrustumPlane(
+			new Vector3(
+				matrix.M12 + matrix.M14,
+				matrix.M22 + matrix.M24,
+				matrix.M32 + matrix.M34),
+			matrix.M42 + matrix.M44),
+
+        // Top
+        new FrustumPlane(
+			new Vector3(
+				matrix.M14 - matrix.M12,
+				matrix.M24 - matrix.M22,
+				matrix.M34 - matrix.M32),
+			matrix.M44 - matrix.M42),
+
+        // Near — Vulkan depth range: 0..1
+        new FrustumPlane(
+			new Vector3(
+				matrix.M13,
+				matrix.M23,
+				matrix.M33),
+			matrix.M43),
+
+        // Far
+        new FrustumPlane(
+			new Vector3(
+				matrix.M14 - matrix.M13,
+				matrix.M24 - matrix.M23,
+				matrix.M34 - matrix.M33),
+			matrix.M44 - matrix.M43)
+		];
+	}
+
+	private static bool IsSphereVisible(
+		Vector3 center,
+		float radius,
+		FrustumPlane[] planes)
+	{
+		foreach (FrustumPlane plane in planes)
+		{
+			float distance =
+				Vector3.Dot(plane.Normal, center) +
+				plane.Distance;
+
+			if (distance < -radius)
+				return false;
+		}
+
+		return true;
+	}
+
+	private TransformResources
         GetOrCreateTransformResources(
             Guid entityId)
     {
@@ -1137,8 +1329,9 @@ public sealed unsafe class RenderBackend : IDisposable
         }
 
         _meshCache.Clear();
+		_meshBoundsCache.Clear();
 
-        foreach (TransformResources resources
+		foreach (TransformResources resources
                  in _transformCache.Values)
         {
             resources.Dispose();

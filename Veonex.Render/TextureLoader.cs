@@ -1,6 +1,5 @@
 ﻿using NeoVeldrid;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using StbImageSharp;
 
 namespace Veonex.Render;
 
@@ -30,36 +29,46 @@ public static class TextureLoader
 				"Only PNG textures are supported.");
 		}
 
-		using Image<Rgba32> image =
-			Image.Load<Rgba32>(path);
+		ImageResult image;
 
-		byte[] pixels =
-			new byte[image.Width * image.Height * 4];
+		using (FileStream stream = File.OpenRead(path))
+		{
+			image = ImageResult.FromStream(
+				stream,
+				ColorComponents.RedGreenBlueAlpha);
+		}
 
-		image.CopyPixelDataTo(pixels);
+		byte[] pixels = image.Data;
 
-		Texture texture =
-			factory.CreateTexture(
-				TextureDescription.Texture2D(
-					(uint)image.Width,
-					(uint)image.Height,
-					1,
-					1,
-					PixelFormat.R8_G8_B8_A8_UNorm,
-					TextureUsage.Sampled));
+		Texture texture = factory.CreateTexture(
+			TextureDescription.Texture2D(
+				(uint)image.Width,
+				(uint)image.Height,
+				1,
+				1,
+				PixelFormat.R8_G8_B8_A8_UNorm,
+				TextureUsage.Sampled));
 
-		graphicsDevice.UpdateTexture(
-			texture,
-			pixels,
-			0,
-			0,
-			0,
-			(uint)image.Width,
-			(uint)image.Height,
-			1,
-			0,
-			0);
+		try
+		{
+			graphicsDevice.UpdateTexture(
+				texture,
+				pixels,
+				0,
+				0,
+				0,
+				(uint)image.Width,
+				(uint)image.Height,
+				1,
+				0,
+				0);
 
-		return texture;
+			return texture;
+		}
+		catch
+		{
+			texture.Dispose();
+			throw;
+		}
 	}
 }

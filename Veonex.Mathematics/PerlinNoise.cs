@@ -1,12 +1,9 @@
-﻿using System;
-using System.Runtime.CompilerServices;
-using Veonex.Mathematics;
+﻿using System.Runtime.CompilerServices;
 
 namespace Veonex.Mathematics
 {
     public static class PerlinNoise
     {
-        // Таблица перестановок для шума Перлина
         private static readonly int[] Permutation = new int[512];
         private static readonly int[] P = new int[512];
         private static readonly DVector3[] Gradients = new DVector3[256];
@@ -14,35 +11,28 @@ namespace Veonex.Mathematics
 
         static PerlinNoise()
         {
-            Initialize(42); // Стандартный seed
+            Initialize(42);
         }
 
-        /// <summary>
-        /// Инициализирует генератор шума с указанным seed
-        /// </summary>
         public static void Initialize(int seed)
         {
             var rand = new Random(seed);
 
-            // Заполнение таблицы градиентов
             for (int i = 0; i < 256; i++)
             {
                 Gradients[i] = GenerateRandomGradient(rand);
             }
 
-            // Заполнение таблицы перестановок
             var perm = new int[256];
             for (int i = 0; i < 256; i++)
                 perm[i] = i;
 
-            // Перемешивание
             for (int i = 255; i > 0; i--)
             {
                 int j = rand.Next(i + 1);
                 (perm[i], perm[j]) = (perm[j], perm[i]);
             }
 
-            // Дублирование для облегчения доступа
             for (int i = 0; i < 512; i++)
             {
                 Permutation[i] = perm[i & 255];
@@ -52,7 +42,6 @@ namespace Veonex.Mathematics
 
         private static DVector3 GenerateRandomGradient(Random rand)
         {
-            // Генерация случайного единичного вектора на сфере
             double theta = rand.NextDouble() * DMath.TwoPi;
             double phi = Math.Acos(2.0 * rand.NextDouble() - 1.0);
 
@@ -63,31 +52,23 @@ namespace Veonex.Mathematics
             );
         }
 
-        /// <summary>
-        /// Генерирует 2D шум Перлина в точке (x, y)
-        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static double Noise2D(double x, double y)
         {
-            // Нахождение ячейки
             int xi = (int)Math.Floor(x) & 255;
             int yi = (int)Math.Floor(y) & 255;
 
-            // Относительные координаты внутри ячейки [0, 1]
             double xf = x - Math.Floor(x);
             double yf = y - Math.Floor(y);
 
-            // Сглаживание
             double u = Fade(xf);
             double v = Fade(yf);
 
-            // Индексы для таблицы перестановок
             int aaa = P[P[xi] + yi];
             int aba = P[P[xi] + yi + 1];
             int aab = P[P[xi + 1] + yi];
             int abb = P[P[xi + 1] + yi + 1];
 
-            // Вычисление градиентов и интерполяция
             double x1 = DMath.Lerp(
                 Grad(aaa, xf, yf, 0.0),
                 Grad(aab, xf - 1.0, yf, 0.0),
@@ -103,9 +84,6 @@ namespace Veonex.Mathematics
             return DMath.Lerp(x1, x2, v);
         }
 
-        /// <summary>
-        /// Генерирует 3D шум Перлина в точке (x, y, z)
-        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static double Noise3D(double x, double y, double z)
         {
@@ -160,9 +138,6 @@ namespace Veonex.Mathematics
             return DMath.Lerp(y1, y2, w);
         }
 
-        /// <summary>
-        /// Генерирует 2D шум с использованием дробного броуновского движения (fBm)
-        /// </summary>
         public static double Fbm2D(double x, double y, int octaves = 6, double lacunarity = 2.0, double gain = 0.5)
         {
             double value = 0.0;
@@ -181,9 +156,6 @@ namespace Veonex.Mathematics
             return value / maxValue;
         }
 
-        /// <summary>
-        /// Генерирует 3D шум с использованием дробного броуновского движения (fBm)
-        /// </summary>
         public static double Fbm3D(double x, double y, double z, int octaves = 6, double lacunarity = 2.0, double gain = 0.5)
         {
             double value = 0.0;
@@ -202,18 +174,12 @@ namespace Veonex.Mathematics
             return value / maxValue;
         }
 
-        /// <summary>
-        /// Сглаживающая функция: 6t^5 - 15t^4 + 10t^3
-        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static double Fade(double t)
         {
             return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
         }
 
-        /// <summary>
-        /// Вычисление градиента для 2D
-        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static double Grad(int hash, double x, double y, double z)
         {
@@ -221,9 +187,6 @@ namespace Veonex.Mathematics
             return grad.X * x + grad.Y * y + grad.Z * z;
         }
 
-        /// <summary>
-        /// Генерирует 2D карту шума
-        /// </summary>
         public static double[,] GenerateNoiseMap2D(int width, int height, double scale = 1.0, DVector2 offset = default)
         {
             var map = new double[width, height];
@@ -243,7 +206,6 @@ namespace Veonex.Mathematics
                 }
             }
 
-            // Нормализация
             double range = maxVal - minVal;
             if (range > 0.0)
             {
@@ -255,9 +217,6 @@ namespace Veonex.Mathematics
             return map;
         }
 
-        /// <summary>
-        /// Генерирует 2D карту шума с использованием fBm
-        /// </summary>
         public static double[,] GenerateFbmMap2D(int width, int height, double scale = 1.0, DVector2 offset = default,
             int octaves = 6, double lacunarity = 2.0, double gain = 0.5)
         {
