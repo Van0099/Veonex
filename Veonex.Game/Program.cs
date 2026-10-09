@@ -26,7 +26,7 @@ try
 		Title = "Veonex",
 		VSync = false,
 		Resizable = true,
-		Fullscreen = false
+		Fullscreen = true
 	};
 
 	using RenderBackend renderer =
@@ -58,7 +58,7 @@ try
 		cameraEntity.Add<Camera>();
 
 	cameraTransform.Position =
-		new DVector3(
+		new DVector3( 
 			0,
 			0,
 			8);

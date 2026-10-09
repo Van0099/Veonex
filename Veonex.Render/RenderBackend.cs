@@ -1,8 +1,9 @@
-﻿using System.Numerics;
-using System.Runtime.InteropServices;
-using NeoVeldrid;
+﻿using NeoVeldrid;
 using SDL;
+using System.Numerics;
+using System.Runtime.InteropServices;
 using Veonex.Core;
+using Veonex.Mathematics;
 
 namespace Veonex.Render;
 
@@ -1020,48 +1021,39 @@ public sealed unsafe class RenderBackend : IDisposable
             Matrix4x4.CreateTranslation(position);
     }
 
-    private static Matrix4x4 CreateViewMatrix(
-        Camera camera)
-    {
-        Transform transform =
-            camera.Entity.Get<Transform>();
 
-        Vector3 position =
-            new(
-                (float)transform.Position.X,
-                (float)transform.Position.Y,
-                (float)transform.Position.Z);
+	private static Matrix4x4 CreateViewMatrix(Camera camera)
+	{
+		Transform transform = camera.Entity.Get<Transform>();
 
-        Vector3 rotation =
-            new(
-                (float)transform.Rotation.X,
-                (float)transform.Rotation.Y,
-                (float)transform.Rotation.Z);
+		Vector3 position = new(
+			(float)transform.Position.X,
+			(float)transform.Position.Y,
+			(float)transform.Position.Z);
 
-        Quaternion quaternion =
-            Quaternion.CreateFromYawPitchRoll(
-                rotation.Y *
-                    (MathF.PI / 180.0f),
-                rotation.X *
-                    (MathF.PI / 180.0f),
-                rotation.Z *
-                    (MathF.PI / 180.0f));
+		DQuaternion rotation = transform.Quaternion;
 
-        Vector3 forward =
-            Vector3.Transform(
-                Vector3.UnitZ,
-                quaternion);
+		DVector3 forwardD =
+			rotation * new DVector3(0.0, 0.0, 1.0);
 
-        Vector3 up =
-            Vector3.Transform(
-                Vector3.UnitY,
-                quaternion);
+		DVector3 upD =
+			rotation * new DVector3(0.0, 1.0, 0.0);
 
-        return Matrix4x4.CreateLookAt(
-            position,
-            position + forward,
-            up);
-    }
+		Vector3 forward = new(
+			(float)forwardD.X,
+			(float)forwardD.Y,
+			(float)forwardD.Z);
+
+		Vector3 up = new(
+			(float)upD.X,
+			(float)upD.Y,
+			(float)upD.Z);
+
+		return Matrix4x4.CreateLookAt(
+			position,
+			position + forward,
+			up);
+	}
 
 	public void ResizeRenderTarget(
 	int width,
