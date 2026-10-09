@@ -9,25 +9,24 @@ namespace Veonex.Render;
 
 public sealed class WindowParameters
 {
-    public int Width { get; init; } = 1280;
-    public int Height { get; init; } = 720;
-    public string Title { get; init; } = "Veonex";
-    public bool VSync { get; init; } = false;
-    public bool Resizable { get; init; } = true;
+	public int Width { get; init; } = 1280;
+	public int Height { get; init; } = 720;
+	public string Title { get; init; } = "Veonex";
+	public bool VSync { get; init; } = false;
+	public bool Resizable { get; init; } = true;
 	public bool Fullscreen { get; init; } = false;
 }
 
 public sealed unsafe class RenderBackend : IDisposable
 {
-    private readonly WindowParameters _parameters;
+	private readonly WindowParameters _parameters;
+	private readonly SDL_Window* _window;
 
-    private readonly SDL_Window* _window;
+	private readonly GraphicsDevice _graphicsDevice;
+	private readonly CommandList _commandList;
 
-    private readonly GraphicsDevice _graphicsDevice;
-    private readonly CommandList _commandList;
-
-    private readonly Shader[] _shaders;
-    private readonly Pipeline _pipeline;
+	private readonly Shader[] _shaders;
+	private readonly Pipeline _pipeline;
 
 	private readonly Shader[] _skyShaders;
 	private readonly Pipeline _skyPipeline;
@@ -39,15 +38,24 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly Sampler _linearSampler;
 	private readonly Texture _whiteTexture;
 
-	private readonly ResourceLayout _transformLayout;
+	private readonly ResourceLayout _cameraLayout;
+	private readonly DeviceBuffer _cameraBuffer;
+	private readonly ResourceSet _cameraResourceSet;
 	private readonly ResourceLayout _materialLayout;
 
 	private readonly Dictionary<Guid, MeshBuffer> _meshCache = [];
-    private readonly Dictionary<Guid, TransformResources> _transformCache = [];
 	private readonly Dictionary<Guid, MaterialResources> _materialCache = [];
 	private readonly Dictionary<string, Texture> _textureCache =
-	    new(StringComparer.OrdinalIgnoreCase);
+		new(StringComparer.OrdinalIgnoreCase);
 	private readonly Dictionary<Guid, MeshBounds> _meshBoundsCache = [];
+
+	// Батч — все сущности с одинаковой парой Mesh.Id + Material.Id.
+	private readonly Dictionary<BatchKey, DrawBatch> _drawBatches = [];
+
+	// Один общий GPU-буфер содержит данные всех экземпляров кадра.
+	private DeviceBuffer? _instanceBuffer;
+	private int _instanceBufferCapacity;
+	private InstanceData[] _instanceUploadData = new InstanceData[1];
 
 	private int _renderWidth;
 	private int _renderHeight;
@@ -57,30 +65,71 @@ public sealed unsafe class RenderBackend : IDisposable
 
 	private bool _disposed;
 
-    public ResourceFactory Factory =>
-        _graphicsDevice.ResourceFactory;
+	public ResourceFactory Factory =>
+		_graphicsDevice.ResourceFactory;
 
-    // layouts
+	private readonly record struct BatchKey(
+		Guid MeshId,
+		Guid MaterialId);
 
-	private sealed class TransformResources : IDisposable
-    {
-        public DeviceBuffer Buffer { get; }
-        public ResourceSet ResourceSet { get; }
+	[StructLayout(LayoutKind.Sequential)]
+	private struct InstanceData
+	{
+		public Matrix4x4 Model;
+		public Vector4 NormalRow0;
+		public Vector4 NormalRow1;
+		public Vector4 NormalRow2;
+	}
 
-        public TransformResources(
-            DeviceBuffer buffer,
-            ResourceSet resourceSet)
-        {
-            Buffer = buffer;
-            ResourceSet = resourceSet;
-        }
+	private static readonly int InstanceDataSize =
+		Marshal.SizeOf<InstanceData>();
 
-        public void Dispose()
-        {
-            ResourceSet.Dispose();
-            Buffer.Dispose();
-        }
-    }
+	private sealed class DrawBatch
+	{
+		public Mesh Mesh { get; }
+		public Material Material { get; }
+
+		private InstanceData[] _instances = new InstanceData[4];
+
+		public int InstanceCount { get; private set; }
+		public int InstanceStart { get; set; }
+
+		public DrawBatch(Mesh mesh, Material material)
+		{
+			Mesh = mesh;
+			Material = material;
+		}
+
+		public void Reset()
+		{
+			InstanceCount = 0;
+			InstanceStart = 0;
+		}
+
+		public void AddInstance(InstanceData instance)
+		{
+			if (InstanceCount == _instances.Length)
+			{
+				Array.Resize(
+					ref _instances,
+					checked(_instances.Length * 2));
+			}
+
+			_instances[InstanceCount++] = instance;
+		}
+
+		public void CopyInstancesTo(
+			InstanceData[] destination,
+			int destinationStart)
+		{
+			Array.Copy(
+				_instances,
+				0,
+				destination,
+				destinationStart,
+				InstanceCount);
+		}
+	}
 
 	private sealed class MaterialResources : IDisposable
 	{
@@ -102,19 +151,18 @@ public sealed unsafe class RenderBackend : IDisposable
 		}
 	}
 
-	// buffers
+	// Buffers
 
 	[StructLayout(LayoutKind.Sequential)]
-    private struct MatrixBuffer
-    {
-        public Matrix4x4 MVP;
+	private struct CameraBuffer
+	{
+		public Matrix4x4 ViewProjection;
 
-        public MatrixBuffer(
-            Matrix4x4 mvp)
-        {
-            MVP = mvp;
-        }
-    }
+		public CameraBuffer(Matrix4x4 viewProjection)
+		{
+			ViewProjection = viewProjection;
+		}
+	}
 
 	[StructLayout(LayoutKind.Sequential)]
 	private struct MaterialBuffer
@@ -132,11 +180,9 @@ public sealed unsafe class RenderBackend : IDisposable
 	{
 		public Matrix4x4 InverseViewProjection;
 
-		public SkyBuffer(
-			Matrix4x4 inverseViewProjection)
+		public SkyBuffer(Matrix4x4 inverseViewProjection)
 		{
-			InverseViewProjection =
-				inverseViewProjection;
+			InverseViewProjection = inverseViewProjection;
 		}
 	}
 
@@ -174,50 +220,39 @@ public sealed unsafe class RenderBackend : IDisposable
 		}
 	}
 
-	public RenderBackend(
-        WindowParameters parameters)
-    {
-        _parameters = parameters;
-
-        _window = CreateWindow();
+	public RenderBackend(WindowParameters parameters)
+	{
+		_parameters = parameters;
+		_window = CreateWindow();
 
 		(_renderWidth, _renderHeight) = GetWindowPixelSize();
 		_fullscreen = _parameters.Fullscreen;
 
-		_graphicsDevice =
-            CreateGraphicsDevice();
+		_graphicsDevice = CreateGraphicsDevice();
 
-		_linearSampler =
-	        Factory.CreateSampler(
-		        new SamplerDescription(
-			        SamplerAddressMode.Wrap,
-			        SamplerAddressMode.Wrap,
-			        SamplerAddressMode.Wrap,
-			        SamplerFilter.MinLinear_MagLinear_MipLinear,
-			        null,
-			        16,
-			        0,
-			        16,
-			        0,
-			        SamplerBorderColor.TransparentBlack));
+		_linearSampler = Factory.CreateSampler(
+			new SamplerDescription(
+				SamplerAddressMode.Wrap,
+				SamplerAddressMode.Wrap,
+				SamplerAddressMode.Wrap,
+				SamplerFilter.MinLinear_MagLinear_MipLinear,
+				null,
+				16,
+				0,
+				16,
+				0,
+				SamplerBorderColor.TransparentBlack));
 
-		_whiteTexture =
-	Factory.CreateTexture(
-		TextureDescription.Texture2D(
-			1,
-			1,
-			1,
-			1,
-			PixelFormat.R8_G8_B8_A8_UNorm,
-			TextureUsage.Sampled));
+		_whiteTexture = Factory.CreateTexture(
+			TextureDescription.Texture2D(
+				1,
+				1,
+				1,
+				1,
+				PixelFormat.R8_G8_B8_A8_UNorm,
+				TextureUsage.Sampled));
 
-		byte[] whitePixel =
-		[
-			255,
-	255,
-	255,
-	255
-		];
+		byte[] whitePixel = [255, 255, 255, 255];
 
 		_graphicsDevice.UpdateTexture(
 			_whiteTexture,
@@ -231,122 +266,106 @@ public sealed unsafe class RenderBackend : IDisposable
 			0,
 			0);
 
-		_commandList =
-            Factory.CreateCommandList();
+		_commandList = Factory.CreateCommandList();
 
-        _transformLayout =
-            Factory.CreateResourceLayout(
-                new ResourceLayoutDescription(
-                    new ResourceLayoutElementDescription(
-                        "MVP",
-                        ResourceKind.UniformBuffer,
-                        ShaderStages.Vertex)));
+		_cameraLayout = Factory.CreateResourceLayout(
+			new ResourceLayoutDescription(
+				new ResourceLayoutElementDescription(
+					"ViewProjection",
+					ResourceKind.UniformBuffer,
+					ShaderStages.Vertex)));
 
-		_materialLayout =
-	Factory.CreateResourceLayout(
-		new ResourceLayoutDescription(
-			new ResourceLayoutElementDescription(
-				"MaterialColor",
-				ResourceKind.UniformBuffer,
-				ShaderStages.Fragment),
+		_cameraBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)Marshal.SizeOf<CameraBuffer>(),
+				BufferUsage.UniformBuffer));
 
-			new ResourceLayoutElementDescription(
-				"AlbedoTexture",
-				ResourceKind.TextureReadOnly,
-				ShaderStages.Fragment),
+		_cameraResourceSet = Factory.CreateResourceSet(
+			new ResourceSetDescription(
+				_cameraLayout,
+				_cameraBuffer));
 
-			new ResourceLayoutElementDescription(
-				"AlbedoSampler",
-				ResourceKind.Sampler,
-				ShaderStages.Fragment)));
+		_materialLayout = Factory.CreateResourceLayout(
+			new ResourceLayoutDescription(
+				new ResourceLayoutElementDescription(
+					"MaterialColor",
+					ResourceKind.UniformBuffer,
+					ShaderStages.Fragment),
+				new ResourceLayoutElementDescription(
+					"AlbedoTexture",
+					ResourceKind.TextureReadOnly,
+					ShaderStages.Fragment),
+				new ResourceLayoutElementDescription(
+					"AlbedoSampler",
+					ResourceKind.Sampler,
+					ShaderStages.Fragment)));
 
-		_skyLayout =
-	Factory.CreateResourceLayout(
-		new ResourceLayoutDescription(
-			new ResourceLayoutElementDescription(
-				"SkyBuffer",
-				ResourceKind.UniformBuffer,
-				ShaderStages.Fragment)));
+		_skyLayout = Factory.CreateResourceLayout(
+			new ResourceLayoutDescription(
+				new ResourceLayoutElementDescription(
+					"SkyBuffer",
+					ResourceKind.UniformBuffer,
+					ShaderStages.Fragment)));
 
-		_skyBuffer =
-			Factory.CreateBuffer(
-				new BufferDescription(
-					(uint)Marshal.SizeOf<SkyBuffer>(),
-					BufferUsage.UniformBuffer));
+		_skyBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)Marshal.SizeOf<SkyBuffer>(),
+				BufferUsage.UniformBuffer));
 
-		_skyResourceSet =
-			Factory.CreateResourceSet(
-				new ResourceSetDescription(
-					_skyLayout,
-					_skyBuffer));
+		_skyResourceSet = Factory.CreateResourceSet(
+			new ResourceSetDescription(
+				_skyLayout,
+				_skyBuffer));
 
-		string shaderPath =
-            Path.Combine(
-                AppContext.BaseDirectory,
-                "Shaders",
-                "Basic.ves");
+		string shaderPath = Path.Combine(
+			AppContext.BaseDirectory,
+			"Shaders",
+			"Basic.ves");
 
-        _shaders =
-            ShaderLoader.Load(
-                Factory,
-                shaderPath);
+		_shaders = ShaderLoader.Load(Factory, shaderPath);
 
-		string skyShaderPath =
-	    Path.Combine(
-		    AppContext.BaseDirectory,
-		    "Shaders",
-		    "Sky.ves");
+		string skyShaderPath = Path.Combine(
+			AppContext.BaseDirectory,
+			"Shaders",
+			"Sky.ves");
 
-		_skyShaders =
-			ShaderLoader.Load(
-				Factory,
-				skyShaderPath);
+		_skyShaders = ShaderLoader.Load(Factory, skyShaderPath);
 
-		_pipeline =
-            CreatePipeline();
-
-		_skyPipeline =
-	        CreateSkyPipeline();
+		_pipeline = CreatePipeline();
+		_skyPipeline = CreateSkyPipeline();
 	}
 
-    private SDL_Window* CreateWindow()
-    {
-        SDL_WindowFlags flags =
-            SDL_WindowFlags.SDL_WINDOW_VULKAN;
+	private SDL_Window* CreateWindow()
+	{
+		SDL_WindowFlags flags = SDL_WindowFlags.SDL_WINDOW_VULKAN;
+
 		if (_parameters.Fullscreen)
 			flags |= SDL_WindowFlags.SDL_WINDOW_FULLSCREEN;
 
 		if (_parameters.Resizable)
-        {
-            flags |=
-                SDL_WindowFlags.SDL_WINDOW_RESIZABLE;
-        }
+			flags |= SDL_WindowFlags.SDL_WINDOW_RESIZABLE;
 
-        byte[] title =
-            System.Text.Encoding.UTF8.GetBytes(
-                _parameters.Title + '\0');
+		byte[] title = System.Text.Encoding.UTF8.GetBytes(
+			_parameters.Title + '\0');
 
-        fixed (byte* titlePtr = title)
-        {
-            SDL_Window* window =
-                SDL3.SDL_CreateWindow(
-                    titlePtr,
-                    _parameters.Width,
-                    _parameters.Height,
-                    flags);
+		fixed (byte* titlePtr = title)
+		{
+			SDL_Window* window = SDL3.SDL_CreateWindow(
+				titlePtr,
+				_parameters.Width,
+				_parameters.Height,
+				flags);
 
 			if (window == null)
 			{
-				string error =
-					SDL3.SDL_GetError();
-
+				string error = SDL3.SDL_GetError();
 				throw new InvalidOperationException(
 					$"Failed to create SDL3 window: {error}");
 			}
 
 			return window;
-        }
-    }
+		}
+	}
 
 	private (int Width, int Height) GetWindowPixelSize()
 	{
@@ -366,307 +385,263 @@ public sealed unsafe class RenderBackend : IDisposable
 	}
 
 	private GraphicsDevice CreateGraphicsDevice()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException(
-                "The current Veonex SDL3/Vulkan backend targets Windows.");
-        }
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			throw new PlatformNotSupportedException(
+				"The current Veonex SDL3/Vulkan backend targets Windows.");
+		}
 
-        SDL_PropertiesID properties =
-            SDL3.SDL_GetWindowProperties(
-                _window);
+		SDL_PropertiesID properties =
+			SDL3.SDL_GetWindowProperties(_window);
 
-        void* hwnd;
-        void* hinstance;
+		void* hwnd;
+		void* hinstance;
 
-        fixed (
-            byte* hwndProperty =
-                SDL3.SDL_PROP_WINDOW_WIN32_HWND_POINTER)
-        fixed (
-            byte* hinstanceProperty =
-                SDL3.SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER)
-        {
-            hwnd =
-                (void*)SDL3.SDL_GetPointerProperty(
-                    properties,
-                    hwndProperty,
-                    0);
+		fixed (byte* hwndProperty =
+			SDL3.SDL_PROP_WINDOW_WIN32_HWND_POINTER)
+		fixed (byte* hinstanceProperty =
+			SDL3.SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER)
+		{
+			hwnd = (void*)SDL3.SDL_GetPointerProperty(
+				properties,
+				hwndProperty,
+				0);
 
-            hinstance =
-                (void*)SDL3.SDL_GetPointerProperty(
-                    properties,
-                    hinstanceProperty,
-                    0);
-        }
+			hinstance = (void*)SDL3.SDL_GetPointerProperty(
+				properties,
+				hinstanceProperty,
+				0);
+		}
 
-        if (hwnd == null)
-        {
-            throw new InvalidOperationException(
-                "SDL3 did not provide a Win32 HWND.");
-        }
+		if (hwnd == null)
+			throw new InvalidOperationException(
+				"SDL3 did not provide a Win32 HWND.");
 
-        if (hinstance == null)
-        {
-            throw new InvalidOperationException(
-                "SDL3 did not provide a Win32 HINSTANCE.");
-        }
+		if (hinstance == null)
+			throw new InvalidOperationException(
+				"SDL3 did not provide a Win32 HINSTANCE.");
 
-		(int width, int height) =
-		GetWindowPixelSize();
+		(int width, int height) = GetWindowPixelSize();
 
-		GraphicsDeviceOptions options =
-	new(
-		debug: true,
-		swapchainDepthFormat:
-			PixelFormat.D24_UNorm_S8_UInt,
-		syncToVerticalBlank:
-			_parameters.VSync,
-		resourceBindingModel:
-			ResourceBindingModel.Improved,
-		preferDepthRangeZeroToOne:
-			true,
-		preferStandardClipSpaceYDirection:
-			true);
+		GraphicsDeviceOptions options = new(
+			debug: true,
+			swapchainDepthFormat: PixelFormat.D24_UNorm_S8_UInt,
+			syncToVerticalBlank: _parameters.VSync,
+			resourceBindingModel: ResourceBindingModel.Improved,
+			preferDepthRangeZeroToOne: true,
+			preferStandardClipSpaceYDirection: true);
 
 		_renderWidth = width;
 		_renderHeight = height;
 
-		SwapchainSource swapchainSource =
-			SwapchainSource.CreateWin32(
-				(nint)hwnd,
-				(nint)hinstance);
+		SwapchainSource swapchainSource = SwapchainSource.CreateWin32(
+			(nint)hwnd,
+			(nint)hinstance);
 
-		SwapchainDescription swapchainDescription =
-			new(
-				swapchainSource,
-				(uint)width,
-				(uint)height,
-				PixelFormat.D24_UNorm_S8_UInt,
-				_parameters.VSync);
+		SwapchainDescription swapchainDescription = new(
+			swapchainSource,
+			(uint)width,
+			(uint)height,
+			PixelFormat.D24_UNorm_S8_UInt,
+			_parameters.VSync);
 
 		return GraphicsDevice.CreateVulkan(
 			options,
 			swapchainDescription);
 	}
 
-    private Pipeline CreatePipeline()
-    {
-        VertexLayoutDescription positionLayout =
-            new(
-                new VertexElementDescription(
-                    "Position",
-                    VertexElementSemantic.Position,
-                    VertexElementFormat.Float3));
+	private Pipeline CreatePipeline()
+	{
+		VertexLayoutDescription positionLayout = new(
+			new VertexElementDescription(
+				"Position",
+				VertexElementSemantic.Position,
+				VertexElementFormat.Float3));
 
-        VertexLayoutDescription normalLayout =
-            new(
-                new VertexElementDescription(
-                    "Normal",
-                    VertexElementSemantic.Normal,
-                    VertexElementFormat.Float3));
+		VertexLayoutDescription normalLayout = new(
+			new VertexElementDescription(
+				"Normal",
+				VertexElementSemantic.Normal,
+				VertexElementFormat.Float3));
 
-		VertexLayoutDescription uvLayout =
-	        new(
-		        new VertexElementDescription(
-			        "UV",
-			        VertexElementSemantic.TextureCoordinate,
-			        VertexElementFormat.Float2));
+		VertexLayoutDescription uvLayout = new(
+			new VertexElementDescription(
+				"UV",
+				VertexElementSemantic.TextureCoordinate,
+				VertexElementFormat.Float2));
 
-		ShaderSetDescription shaderSet =
-	        new(
-		        [
-			        positionLayout,
-			        normalLayout,
-			        uvLayout
-		        ],
-		        _shaders);
+		VertexLayoutDescription instanceLayout = new(
+			(uint)InstanceDataSize,
+			1,
+			new VertexElementDescription(
+				"InstanceRow0",
+				VertexElementSemantic.TextureCoordinate,
+				VertexElementFormat.Float4,
+				0),
+			new VertexElementDescription(
+				"InstanceRow1",
+				VertexElementSemantic.TextureCoordinate,
+				VertexElementFormat.Float4,
+				16),
+			new VertexElementDescription(
+				"InstanceRow2",
+				VertexElementSemantic.TextureCoordinate,
+				VertexElementFormat.Float4,
+				32),
+			new VertexElementDescription(
+				"InstanceRow3",
+				VertexElementSemantic.TextureCoordinate,
+				VertexElementFormat.Float4,
+				48),
+			new VertexElementDescription(
+				"InstanceNormalRow0",
+				VertexElementSemantic.TextureCoordinate,
+				VertexElementFormat.Float4,
+				64),
+			new VertexElementDescription(
+				"InstanceNormalRow1",
+				VertexElementSemantic.TextureCoordinate,
+				VertexElementFormat.Float4,
+				80),
+			new VertexElementDescription(
+				"InstanceNormalRow2",
+				VertexElementSemantic.TextureCoordinate,
+				VertexElementFormat.Float4,
+				96));
 
-		RasterizerStateDescription rasterizer =
-            new(
-				FaceCullMode.Back,
-                PolygonFillMode.Solid,
-                FrontFace.Clockwise,
-                depthClipEnabled: true,
-                scissorTestEnabled: false);
+		ShaderSetDescription shaderSet = new(
+			[
+				positionLayout,
+				normalLayout,
+				uvLayout,
+				instanceLayout
+			],
+			_shaders);
 
-        DepthStencilStateDescription depthState =
-            new(
-                depthTestEnabled: true,
-                depthWriteEnabled: true,
-                comparisonKind: ComparisonKind.LessEqual);
+		RasterizerStateDescription rasterizer = new(
+			FaceCullMode.Back,
+			PolygonFillMode.Solid,
+			FrontFace.Clockwise,
+			depthClipEnabled: true,
+			scissorTestEnabled: false);
 
-        GraphicsPipelineDescription description =
-            new(
-                BlendStateDescription.SingleOverrideBlend,
-                depthState,
-                rasterizer,
-                PrimitiveTopology.TriangleList,
-                shaderSet,
-				[
-	                _transformLayout,
-	                _materialLayout
-                ],
-                _graphicsDevice
-                    .SwapchainFramebuffer
-                    .OutputDescription);
+		DepthStencilStateDescription depthState = new(
+			depthTestEnabled: true,
+			depthWriteEnabled: true,
+			comparisonKind: ComparisonKind.LessEqual);
 
-        return Factory.CreateGraphicsPipeline(
-            description);
-    }
+		GraphicsPipelineDescription description = new(
+			BlendStateDescription.SingleOverrideBlend,
+			depthState,
+			rasterizer,
+			PrimitiveTopology.TriangleList,
+			shaderSet,
+			[
+				_cameraLayout,
+				_materialLayout
+			],
+			_graphicsDevice.SwapchainFramebuffer.OutputDescription);
+
+		return Factory.CreateGraphicsPipeline(description);
+	}
 
 	private Pipeline CreateSkyPipeline()
 	{
-		ShaderSetDescription shaderSet =
-			new(
-				[],
-				_skyShaders);
+		ShaderSetDescription shaderSet = new([], _skyShaders);
 
-		RasterizerStateDescription rasterizer =
-			new(
-				FaceCullMode.None,
-				PolygonFillMode.Solid,
-				FrontFace.Clockwise,
-				depthClipEnabled: false,
-				scissorTestEnabled: false);
+		RasterizerStateDescription rasterizer = new(
+			FaceCullMode.None,
+			PolygonFillMode.Solid,
+			FrontFace.Clockwise,
+			depthClipEnabled: false,
+			scissorTestEnabled: false);
 
-		DepthStencilStateDescription depthState =
-			new(
-				depthTestEnabled: false,
-				depthWriteEnabled: false,
-				comparisonKind: ComparisonKind.Always);
+		DepthStencilStateDescription depthState = new(
+			depthTestEnabled: false,
+			depthWriteEnabled: false,
+			comparisonKind: ComparisonKind.Always);
 
-		GraphicsPipelineDescription description =
-			new(
-				BlendStateDescription.SingleOverrideBlend,
-				depthState,
-				rasterizer,
-				PrimitiveTopology.TriangleList,
-				shaderSet,
-				[
-					_skyLayout
-				],
-				_graphicsDevice
-					.SwapchainFramebuffer
-					.OutputDescription);
+		GraphicsPipelineDescription description = new(
+			BlendStateDescription.SingleOverrideBlend,
+			depthState,
+			rasterizer,
+			PrimitiveTopology.TriangleList,
+			shaderSet,
+			[_skyLayout],
+			_graphicsDevice.SwapchainFramebuffer.OutputDescription);
 
-		return Factory.CreateGraphicsPipeline(
-			description);
+		return Factory.CreateGraphicsPipeline(description);
 	}
 
-	public void RenderFrame(
-        Scene scene,
-        Camera camera)
-    {
-		if (_renderWidth <= 0 ||
-	        _renderHeight <= 0)
+	public void RenderFrame(Scene scene, Camera camera)
+	{
+		if (_renderWidth <= 0 || _renderHeight <= 0)
+			return;
+
+		float aspect = (float)_renderWidth / _renderHeight;
+		camera.AspectRatio = aspect;
+
+		Matrix4x4 view = CreateViewMatrix(camera);
+
+		Matrix4x4 projection = Matrix4x4.CreatePerspectiveFieldOfView(
+			(float)(camera.FieldOfView * Math.PI / 180.0),
+			aspect,
+			(float)camera.NearClip,
+			(float)camera.FarClip);
+
+		Matrix4x4 viewProjection = view * projection;
+
+		if (!Matrix4x4.Invert(
+			viewProjection,
+			out Matrix4x4 inverseViewProjection))
 		{
 			return;
 		}
 
-		float aspect =
-			(float)_renderWidth /
-			_renderHeight;
-
-		camera.AspectRatio =
-			aspect;
-
-		Matrix4x4 view =
-            CreateViewMatrix(camera);
-
-        Matrix4x4 projection =
-            Matrix4x4.CreatePerspectiveFieldOfView(
-                (float)(
-                    camera.FieldOfView *
-                    Math.PI /
-                    180.0),
-                aspect,
-                (float)camera.NearClip,
-                (float)camera.FarClip);
-
-		Matrix4x4 viewProjection =
-	        view *
-	        projection;
-
-		        if (!Matrix4x4.Invert(
-				        viewProjection,
-				        out Matrix4x4 inverseViewProjection))
-		        {
-			        return;
-		        }
-
 		FrustumPlane[] frustumPlanes =
-		CreateFrustumPlanes(viewProjection);
+			CreateFrustumPlanes(viewProjection);
 
-		HashSet<Guid> activeTransforms = [];
-
-		_commandList.Begin();
-
-		_commandList.SetFramebuffer(
-			_graphicsDevice.SwapchainFramebuffer);
-
-		_commandList.SetFullViewports();
-
-		_commandList.ClearColorTarget(
-			0,
-			RgbaFloat.Black);
-
-		_commandList.ClearDepthStencil(
-			1.0f);
-
-		_graphicsDevice.UpdateBuffer(
-	        _skyBuffer,
-	        0,
-	        new SkyBuffer(
-		        inverseViewProjection));
-
-		_commandList.SetPipeline(
-			_skyPipeline);
-
-		_commandList.SetGraphicsResourceSet(
-			0,
-			_skyResourceSet);
-
-		_commandList.Draw(
-			3);
-
-		_commandList.SetPipeline(
-			_pipeline);
+		// Пересобираем CPU-батчи. На этом этапе никаких DrawIndexed
+		// ещё не вызывается: сначала группируем одинаковые меши и материалы.
+		foreach (DrawBatch batch in _drawBatches.Values)
+			batch.Reset();
 
 		foreach (Entity entity in scene.Entities)
-        {
-            if (!entity.Has<MeshRenderer>())
-                continue;
-
-            MeshRenderer renderer =
-                entity.Get<MeshRenderer>();
-
-            if (!renderer.Visible)
-                continue;
-
-            if (renderer.Mesh == null)
-                continue;
-
-			if (renderer.Material == null)
+		{
+			if (!entity.Has<MeshRenderer>())
 				continue;
 
-			if (!renderer.Mesh.Data.HasNormals)
-                continue;
+			MeshRenderer renderer = entity.Get<MeshRenderer>();
 
-            if (!entity.Has<Transform>())
-                continue;
+			if (!renderer.Visible ||
+				renderer.Mesh == null ||
+				renderer.Material == null ||
+				!renderer.Mesh.Data.HasNormals ||
+				!entity.Has<Transform>())
+			{
+				continue;
+			}
+
+			Mesh mesh = renderer.Mesh;
+			Material material = renderer.Material;
+			BatchKey key = new(mesh.Id, material.Id);
+
+			if (!_drawBatches.TryGetValue(key, out DrawBatch? batch))
+			{
+				batch = new DrawBatch(mesh, material);
+				_drawBatches.Add(key, batch);
+			}
 
 			Transform transform = entity.Get<Transform>();
+			InstanceData instance = CreateInstanceData(transform);
 
-			activeTransforms.Add(entity.Id);
-
-			Matrix4x4 model = CreateModelMatrix(transform);
-
-			MeshBounds bounds =
-				GetOrCreateMeshBounds(renderer.Mesh);
-
-			Vector3 worldCenter =
-				Vector3.Transform(bounds.Center, model);
+			// CPU frustum culling: don't put instances outside the camera
+			// frustum into the batch, so they generate no GPU work this frame.
+			MeshBounds bounds = GetOrCreateMeshBounds(mesh);
+			Vector3 worldCenter = Vector3.Transform(
+				bounds.Center,
+				instance.Model);
 
 			Vector3 scale = new(
 				(float)transform.Scale.X,
@@ -689,8 +664,73 @@ public sealed unsafe class RenderBackend : IDisposable
 				continue;
 			}
 
-			Material material = renderer.Material;
+			batch.AddInstance(instance);
+		}
 
+		int totalInstanceCount = 0;
+
+		foreach (DrawBatch batch in _drawBatches.Values)
+			totalInstanceCount = checked(totalInstanceCount + batch.InstanceCount);
+
+		if (totalInstanceCount > 0)
+		{
+			EnsureInstanceUploadCapacity(totalInstanceCount);
+
+			int instanceOffset = 0;
+
+			foreach (DrawBatch batch in _drawBatches.Values)
+			{
+				if (batch.InstanceCount == 0)
+					continue;
+
+				batch.InstanceStart = instanceOffset;
+				batch.CopyInstancesTo(_instanceUploadData, instanceOffset);
+				instanceOffset += batch.InstanceCount;
+			}
+
+			EnsureInstanceBufferCapacity(_instanceUploadData.Length);
+
+			_graphicsDevice.UpdateBuffer(
+				_instanceBuffer!,
+				0,
+				ref _instanceUploadData[0],
+				checked((uint)(totalInstanceCount * InstanceDataSize)));
+		}
+
+		_graphicsDevice.UpdateBuffer(
+			_cameraBuffer,
+			0,
+			new CameraBuffer(viewProjection));
+
+		_graphicsDevice.UpdateBuffer(
+			_skyBuffer,
+			0,
+			new SkyBuffer(inverseViewProjection));
+
+		_commandList.Begin();
+
+		_commandList.SetFramebuffer(
+			_graphicsDevice.SwapchainFramebuffer);
+
+		_commandList.SetFullViewports();
+		_commandList.ClearColorTarget(0, RgbaFloat.Black);
+		_commandList.ClearDepthStencil(1.0f);
+
+		_commandList.SetPipeline(_skyPipeline);
+		_commandList.SetGraphicsResourceSet(0, _skyResourceSet);
+		_commandList.Draw(3);
+
+		_commandList.SetPipeline(_pipeline);
+		_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
+
+		foreach (KeyValuePair<BatchKey, DrawBatch> pair in _drawBatches)
+		{
+			DrawBatch batch = pair.Value;
+
+			if (batch.InstanceCount == 0)
+				continue;
+
+			Material material = batch.Material;
 			MaterialResources materialResources =
 				GetOrCreateMaterialResources(material);
 
@@ -700,30 +740,12 @@ public sealed unsafe class RenderBackend : IDisposable
 				(float)material.AlbedoColor.Z,
 				(float)material.AlbedoColor.W);
 
-			MeshBuffer meshBuffer =
-				GetOrCreateMeshBuffer(renderer.Mesh);
-
-			Matrix4x4 mvp =
-				model *
-				view *
-				projection;
-
-			TransformResources resources =
-				GetOrCreateTransformResources(entity.Id);
-
-			_graphicsDevice.UpdateBuffer(
-				resources.Buffer,
-				0,
-				new MatrixBuffer(mvp));
-
 			_graphicsDevice.UpdateBuffer(
 				materialResources.Buffer,
 				0,
 				new MaterialBuffer(albedoColor));
 
-			_commandList.SetGraphicsResourceSet(
-				0,
-				resources.ResourceSet);
+			MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
 
 			_commandList.SetGraphicsResourceSet(
 				1,
@@ -747,56 +769,108 @@ public sealed unsafe class RenderBackend : IDisposable
 					meshBuffer.UVBuffer);
 			}
 
+			uint instanceBufferOffset = checked(
+				(uint)(batch.InstanceStart * InstanceDataSize));
+
+			_commandList.SetVertexBuffer(
+				3,
+				_instanceBuffer!,
+				instanceBufferOffset);
+
 			_commandList.SetIndexBuffer(
 				meshBuffer.IndexBuffer,
 				IndexFormat.UInt32);
 
 			_commandList.DrawIndexed(
 				meshBuffer.IndexCount,
-				1,
+				(uint)batch.InstanceCount,
 				0,
 				0,
 				0);
 		}
 
-        _commandList.End();
+		_commandList.End();
 
-        _graphicsDevice.SubmitCommands(
-            _commandList);
+		_graphicsDevice.SubmitCommands(_commandList);
+		_graphicsDevice.SwapBuffers();
+	}
 
-        _graphicsDevice.SwapBuffers();
+	private void EnsureInstanceUploadCapacity(int requiredCount)
+	{
+		if (_instanceUploadData.Length >= requiredCount)
+			return;
 
-        CleanupUnusedTransformResources(
-            activeTransforms);
-    }
+		int capacity = Math.Max(1, _instanceUploadData.Length);
+
+		while (capacity < requiredCount)
+		{
+			if (capacity > int.MaxValue / 2)
+			{
+				capacity = requiredCount;
+				break;
+			}
+
+			capacity *= 2;
+		}
+
+		Array.Resize(ref _instanceUploadData, capacity);
+	}
+
+	private void EnsureInstanceBufferCapacity(int requiredCapacity)
+	{
+		if (_instanceBuffer != null &&
+			_instanceBufferCapacity >= requiredCapacity)
+		{
+			return;
+		}
+
+		// Allocate at least 4096 slots on first use so a terrain that is
+		// populated over several frames does not recreate the GPU buffer
+		// for every small increase in the instance count.
+		int capacity = _instanceBufferCapacity == 0
+			? 4096
+			: _instanceBufferCapacity;
+
+		while (capacity < requiredCapacity)
+		{
+			if (capacity > int.MaxValue / 2)
+			{
+				capacity = requiredCapacity;
+				break;
+			}
+
+			capacity *= 2;
+		}
+
+		uint bufferSize = checked((uint)(capacity * InstanceDataSize));
+
+		DeviceBuffer newBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				bufferSize,
+				BufferUsage.VertexBuffer));
+
+		_instanceBuffer?.Dispose();
+		_instanceBuffer = newBuffer;
+		_instanceBufferCapacity = capacity;
+	}
 
 	private Texture GetOrCreateTexture(string path)
 	{
-		string fullPath =
-			Path.GetFullPath(path);
+		string fullPath = Path.GetFullPath(path);
 
-		if (_textureCache.TryGetValue(
-			fullPath,
-			out Texture? existing))
-		{
+		if (_textureCache.TryGetValue(fullPath, out Texture? existing))
 			return existing;
-		}
 
-		Texture texture =
-			TextureLoader.Load(
-				Factory,
-				_graphicsDevice,
-				fullPath);
+		Texture texture = TextureLoader.Load(
+			Factory,
+			_graphicsDevice,
+			fullPath);
 
-		_textureCache.Add(
-			fullPath,
-			texture);
-
+		_textureCache.Add(fullPath, texture);
 		return texture;
 	}
 
-	private MaterialResources GetOrCreateMaterialResources(
-	Material material)
+	private MaterialResources GetOrCreateMaterialResources(Material material)
 	{
 		if (_materialCache.TryGetValue(
 			material.Id,
@@ -805,65 +879,43 @@ public sealed unsafe class RenderBackend : IDisposable
 			return existing;
 		}
 
-		DeviceBuffer buffer =
-			Factory.CreateBuffer(
-				new BufferDescription(
-					(uint)Marshal.SizeOf<MaterialBuffer>(),
-					BufferUsage.UniformBuffer));
+		DeviceBuffer buffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)Marshal.SizeOf<MaterialBuffer>(),
+				BufferUsage.UniformBuffer));
 
-		Texture texture =
-	string.IsNullOrWhiteSpace(material.Albedo)
-		? _whiteTexture
-		: GetOrCreateTexture(material.Albedo);
+		Texture texture = string.IsNullOrWhiteSpace(material.Albedo)
+			? _whiteTexture
+			: GetOrCreateTexture(material.Albedo);
 
-		ResourceSet resourceSet =
-			Factory.CreateResourceSet(
-				new ResourceSetDescription(
-					_materialLayout,
-					buffer,
-					texture,
-					_linearSampler));
-
-		MaterialResources resources =
-			new(
+		ResourceSet resourceSet = Factory.CreateResourceSet(
+			new ResourceSetDescription(
+				_materialLayout,
 				buffer,
-				resourceSet);
+				texture,
+				_linearSampler));
 
-		_materialCache.Add(
-			material.Id,
-			resources);
+		MaterialResources resources = new(buffer, resourceSet);
+		_materialCache.Add(material.Id, resources);
 
 		return resources;
 	}
 
-	private MeshBuffer GetOrCreateMeshBuffer(
-        Mesh mesh)
-    {
-        if (_meshCache.TryGetValue(
-            mesh.Id,
-            out MeshBuffer? existing))
-        {
-            return existing;
-        }
+	private MeshBuffer GetOrCreateMeshBuffer(Mesh mesh)
+	{
+		if (_meshCache.TryGetValue(mesh.Id, out MeshBuffer? existing))
+			return existing;
 
-        MeshBuffer created =
-            CreateMeshBuffer(mesh);
+		MeshBuffer created = CreateMeshBuffer(mesh);
+		_meshCache.Add(mesh.Id, created);
 
-        _meshCache.Add(
-            mesh.Id,
-            created);
-
-        return created;
-    }
+		return created;
+	}
 
 	private MeshBounds GetOrCreateMeshBounds(Mesh mesh)
 	{
-		if (_meshBoundsCache.TryGetValue(
-			mesh.Id,
-			out MeshBounds existing))
-		{
+		if (_meshBoundsCache.TryGetValue(mesh.Id, out MeshBounds existing))
 			return existing;
-		}
 
 		MeshData data = mesh.Data;
 
@@ -908,181 +960,63 @@ public sealed unsafe class RenderBackend : IDisposable
 				Vector3.DistanceSquared(center, position));
 		}
 
-		MeshBounds bounds = new(
-			center,
-			MathF.Sqrt(radiusSquared));
-
+		MeshBounds bounds = new(center, MathF.Sqrt(radiusSquared));
 		_meshBoundsCache.Add(mesh.Id, bounds);
 
 		return bounds;
 	}
 
-	private MeshBuffer CreateMeshBuffer(
-        Mesh mesh)
-    {
-        MeshData data =
-            mesh.Data;
-
-        Vector3[] positions =
-            new Vector3[data.VertexCount];
-
-        for (int i = 0; i < data.VertexCount; i++)
-        {
-            positions[i] =
-                new Vector3(
-                    (float)data.Positions[i].X,
-                    (float)data.Positions[i].Y,
-                    (float)data.Positions[i].Z);
-        }
-
-        DeviceBuffer positionBuffer =
-            Factory.CreateBuffer(
-                new BufferDescription(
-                    (uint)(
-                        data.VertexCount *
-                        sizeof(float) *
-                        3),
-                    BufferUsage.VertexBuffer));
-
-        _graphicsDevice.UpdateBuffer(
-            positionBuffer,
-            0,
-            positions);
-
-        DeviceBuffer? normalBuffer = null;
-
-        if (data.HasNormals)
-        {
-            Vector3[] normals =
-                new Vector3[data.VertexCount];
-
-            for (int i = 0; i < data.VertexCount; i++)
-            {
-                normals[i] =
-                    new Vector3(
-                        (float)data.Normals[i].X,
-                        (float)data.Normals[i].Y,
-                        (float)data.Normals[i].Z);
-            }
-
-            normalBuffer =
-                Factory.CreateBuffer(
-                    new BufferDescription(
-                        (uint)(
-                            data.VertexCount *
-                            sizeof(float) *
-                            3),
-                        BufferUsage.VertexBuffer));
-
-            _graphicsDevice.UpdateBuffer(
-                normalBuffer,
-                0,
-                normals);
-        }
-
-        DeviceBuffer? uvBuffer = null;
-
-        if (data.HasUVs)
-        {
-            Vector2[] uvs =
-                new Vector2[data.VertexCount];
-
-            for (int i = 0; i < data.VertexCount; i++)
-            {
-                uvs[i] =
-                    new Vector2(
-                        (float)data.UVs[i].X,
-                        (float)data.UVs[i].Y);
-            }
-
-            uvBuffer =
-                Factory.CreateBuffer(
-                    new BufferDescription(
-                        (uint)(
-                            data.VertexCount *
-                            sizeof(float) *
-                            2),
-                        BufferUsage.VertexBuffer));
-
-            _graphicsDevice.UpdateBuffer(
-                uvBuffer,
-                0,
-                uvs);
-        }
-
-        DeviceBuffer indexBuffer =
-            Factory.CreateBuffer(
-                new BufferDescription(
-                    (uint)(
-                        data.IndexCount *
-                        sizeof(uint)),
-                    BufferUsage.IndexBuffer));
-
-        _graphicsDevice.UpdateBuffer(
-            indexBuffer,
-            0,
-            data.Indices);
-
-        return new MeshBuffer(
-            positionBuffer,
-            indexBuffer,
-            (uint)data.IndexCount,
-            normalBuffer,
-            uvBuffer);
-    }
-
-	private static FrustumPlane[] CreateFrustumPlanes(
-	Matrix4x4 matrix)
+	private static FrustumPlane[] CreateFrustumPlanes(Matrix4x4 matrix)
 	{
 		return
 		[
-			// Left
-			new FrustumPlane(
-			new Vector3(
-				matrix.M11 + matrix.M14,
-				matrix.M21 + matrix.M24,
-				matrix.M31 + matrix.M34),
-			matrix.M41 + matrix.M44),
+            // Left
+            new FrustumPlane(
+				new Vector3(
+					matrix.M11 + matrix.M14,
+					matrix.M21 + matrix.M24,
+					matrix.M31 + matrix.M34),
+				matrix.M41 + matrix.M44),
 
-        // Right
-        new FrustumPlane(
-			new Vector3(
-				matrix.M14 - matrix.M11,
-				matrix.M24 - matrix.M21,
-				matrix.M34 - matrix.M31),
-			matrix.M44 - matrix.M41),
+            // Right
+            new FrustumPlane(
+				new Vector3(
+					matrix.M14 - matrix.M11,
+					matrix.M24 - matrix.M21,
+					matrix.M34 - matrix.M31),
+				matrix.M44 - matrix.M41),
 
-        // Bottom
-        new FrustumPlane(
-			new Vector3(
-				matrix.M12 + matrix.M14,
-				matrix.M22 + matrix.M24,
-				matrix.M32 + matrix.M34),
-			matrix.M42 + matrix.M44),
+            // Bottom
+            new FrustumPlane(
+				new Vector3(
+					matrix.M12 + matrix.M14,
+					matrix.M22 + matrix.M24,
+					matrix.M32 + matrix.M34),
+				matrix.M42 + matrix.M44),
 
-        // Top
-        new FrustumPlane(
-			new Vector3(
-				matrix.M14 - matrix.M12,
-				matrix.M24 - matrix.M22,
-				matrix.M34 - matrix.M32),
-			matrix.M44 - matrix.M42),
+            // Top
+            new FrustumPlane(
+				new Vector3(
+					matrix.M14 - matrix.M12,
+					matrix.M24 - matrix.M22,
+					matrix.M34 - matrix.M32),
+				matrix.M44 - matrix.M42),
 
-        // Near — Vulkan depth range: 0..1
-        new FrustumPlane(
-			new Vector3(
-				matrix.M13,
-				matrix.M23,
-				matrix.M33),
-			matrix.M43),
+            // Near — Vulkan clip-space depth range is 0..1.
+            new FrustumPlane(
+				new Vector3(
+					matrix.M13,
+					matrix.M23,
+					matrix.M33),
+				matrix.M43),
 
-        // Far
-        new FrustumPlane(
-			new Vector3(
-				matrix.M14 - matrix.M13,
-				matrix.M24 - matrix.M23,
-				matrix.M34 - matrix.M33),
-			matrix.M44 - matrix.M43)
+            // Far
+            new FrustumPlane(
+				new Vector3(
+					matrix.M14 - matrix.M13,
+					matrix.M24 - matrix.M23,
+					matrix.M34 - matrix.M33),
+				matrix.M44 - matrix.M43)
 		];
 	}
 
@@ -1104,115 +1038,142 @@ public sealed unsafe class RenderBackend : IDisposable
 		return true;
 	}
 
-	private TransformResources
-        GetOrCreateTransformResources(
-            Guid entityId)
-    {
-        if (_transformCache.TryGetValue(
-            entityId,
-            out TransformResources? existing))
-        {
-            return existing;
-        }
+	private MeshBuffer CreateMeshBuffer(Mesh mesh)
+	{
+		MeshData data = mesh.Data;
 
-        DeviceBuffer buffer =
-            Factory.CreateBuffer(
-                new BufferDescription(
-                    (uint)Marshal.SizeOf<MatrixBuffer>(),
-                    BufferUsage.UniformBuffer));
+		Vector3[] positions = new Vector3[data.VertexCount];
 
-        ResourceSet resourceSet =
-            Factory.CreateResourceSet(
-                new ResourceSetDescription(
-                    _transformLayout,
-                    buffer));
+		for (int i = 0; i < data.VertexCount; i++)
+		{
+			positions[i] = new Vector3(
+				(float)data.Positions[i].X,
+				(float)data.Positions[i].Y,
+				(float)data.Positions[i].Z);
+		}
 
-        TransformResources resources =
-            new(
-                buffer,
-                resourceSet);
+		DeviceBuffer positionBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)(data.VertexCount * sizeof(float) * 3),
+				BufferUsage.VertexBuffer));
 
-        _transformCache.Add(
-            entityId,
-            resources);
+		_graphicsDevice.UpdateBuffer(positionBuffer, 0, positions);
 
-        return resources;
-    }
+		DeviceBuffer? normalBuffer = null;
 
-    private void CleanupUnusedTransformResources(
-        HashSet<Guid> activeEntities)
-    {
-        List<Guid>? remove = null;
+		if (data.HasNormals)
+		{
+			Vector3[] normals = new Vector3[data.VertexCount];
 
-        foreach (Guid id in _transformCache.Keys)
-        {
-            if (activeEntities.Contains(id))
-                continue;
+			for (int i = 0; i < data.VertexCount; i++)
+			{
+				normals[i] = new Vector3(
+					(float)data.Normals[i].X,
+					(float)data.Normals[i].Y,
+					(float)data.Normals[i].Z);
+			}
 
-            remove ??= [];
+			normalBuffer = Factory.CreateBuffer(
+				new BufferDescription(
+					(uint)(data.VertexCount * sizeof(float) * 3),
+					BufferUsage.VertexBuffer));
 
-            remove.Add(id);
-        }
+			_graphicsDevice.UpdateBuffer(normalBuffer, 0, normals);
+		}
 
-        if (remove == null)
-            return;
+		DeviceBuffer? uvBuffer = null;
 
-        foreach (Guid id in remove)
-        {
-            TransformResources resources =
-                _transformCache[id];
+		if (data.HasUVs)
+		{
+			Vector2[] uvs = new Vector2[data.VertexCount];
 
-            resources.Dispose();
+			for (int i = 0; i < data.VertexCount; i++)
+			{
+				uvs[i] = new Vector2(
+					(float)data.UVs[i].X,
+					(float)data.UVs[i].Y);
+			}
 
-            _transformCache.Remove(id);
-        }
-    }
+			uvBuffer = Factory.CreateBuffer(
+				new BufferDescription(
+					(uint)(data.VertexCount * sizeof(float) * 2),
+					BufferUsage.VertexBuffer));
 
-    private static Matrix4x4 CreateModelMatrix(
-        Transform transform)
-    {
-        Vector3 position =
-            new(
-                (float)transform.Position.X,
-                (float)transform.Position.Y,
-                (float)transform.Position.Z);
+			_graphicsDevice.UpdateBuffer(uvBuffer, 0, uvs);
+		}
 
-        Vector3 scale =
-            new(
-                (float)transform.Scale.X,
-                (float)transform.Scale.Y,
-                (float)transform.Scale.Z);
+		DeviceBuffer indexBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)(data.IndexCount * sizeof(uint)),
+				BufferUsage.IndexBuffer));
 
-        Vector3 rotation =
-            new(
-                (float)transform.Rotation.X,
-                (float)transform.Rotation.Y,
-                (float)transform.Rotation.Z);
+		_graphicsDevice.UpdateBuffer(indexBuffer, 0, data.Indices);
 
-        float radiansX =
-            rotation.X *
-            (MathF.PI / 180.0f);
+		return new MeshBuffer(
+			positionBuffer,
+			indexBuffer,
+			(uint)data.IndexCount,
+			normalBuffer,
+			uvBuffer);
+	}
 
-        float radiansY =
-            rotation.Y *
-            (MathF.PI / 180.0f);
+	private static InstanceData CreateInstanceData(Transform transform)
+	{
+		Vector3 position = new(
+			(float)transform.Position.X,
+			(float)transform.Position.Y,
+			(float)transform.Position.Z);
 
-        float radiansZ =
-            rotation.Z *
-            (MathF.PI / 180.0f);
+		Vector3 scale = new(
+			(float)transform.Scale.X,
+			(float)transform.Scale.Y,
+			(float)transform.Scale.Z);
 
-        Quaternion quaternion =
-            Quaternion.CreateFromYawPitchRoll(
-                radiansY,
-                radiansX,
-                radiansZ);
+		Vector3 rotation = new(
+			(float)transform.Rotation.X,
+			(float)transform.Rotation.Y,
+			(float)transform.Rotation.Z);
 
-        return
-            Matrix4x4.CreateScale(scale) *
-            Matrix4x4.CreateFromQuaternion(quaternion) *
-            Matrix4x4.CreateTranslation(position);
-    }
+		float radiansX = rotation.X * (MathF.PI / 180.0f);
+		float radiansY = rotation.Y * (MathF.PI / 180.0f);
+		float radiansZ = rotation.Z * (MathF.PI / 180.0f);
 
+		Quaternion quaternion = Quaternion.CreateFromYawPitchRoll(
+			radiansY,
+			radiansX,
+			radiansZ);
+
+		Matrix4x4 model = Matrix4x4.CreateScale(scale) *
+						  Matrix4x4.CreateFromQuaternion(quaternion) *
+						  Matrix4x4.CreateTranslation(position);
+
+		// Вычисляем normal matrix на CPU один раз на экземпляр,
+		// а не выполняем inverse() на GPU для каждой вершины.
+		Matrix4x4 normalMatrix = Matrix4x4.Identity;
+
+		if (Matrix4x4.Invert(model, out Matrix4x4 inverseModel))
+			normalMatrix = Matrix4x4.Transpose(inverseModel);
+
+		return new InstanceData
+		{
+			Model = model,
+			NormalRow0 = new Vector4(
+				normalMatrix.M11,
+				normalMatrix.M12,
+				normalMatrix.M13,
+				normalMatrix.M14),
+			NormalRow1 = new Vector4(
+				normalMatrix.M21,
+				normalMatrix.M22,
+				normalMatrix.M23,
+				normalMatrix.M24),
+			NormalRow2 = new Vector4(
+				normalMatrix.M31,
+				normalMatrix.M32,
+				normalMatrix.M33,
+				normalMatrix.M34)
+		};
+	}
 
 	private static Matrix4x4 CreateViewMatrix(Camera camera)
 	{
@@ -1247,25 +1208,15 @@ public sealed unsafe class RenderBackend : IDisposable
 			up);
 	}
 
-	public void ResizeRenderTarget(
-	int width,
-	int height)
+	public void ResizeRenderTarget(int width, int height)
 	{
-		if (width <= 0 ||
-			height <= 0)
-		{
+		if (width <= 0 || height <= 0)
 			return;
-		}
 
-		if (_renderWidth == width &&
-			_renderHeight == height)
-		{
+		if (_renderWidth == width && _renderHeight == height)
 			return;
-		}
 
-		_graphicsDevice.ResizeMainWindow(
-			(uint)width,
-			(uint)height);
+		_graphicsDevice.ResizeMainWindow((uint)width, (uint)height);
 
 		_renderWidth = width;
 		_renderHeight = height;
@@ -1274,10 +1225,7 @@ public sealed unsafe class RenderBackend : IDisposable
 	public void ToggleFullscreen()
 	{
 		_fullscreen = !_fullscreen;
-
-		SDL3.SDL_SetWindowFullscreen(
-			_window,
-			_fullscreen);
+		SDL3.SDL_SetWindowFullscreen(_window, _fullscreen);
 	}
 
 	public void SetFullscreen(bool fullscreen)
@@ -1286,10 +1234,7 @@ public sealed unsafe class RenderBackend : IDisposable
 			return;
 
 		_fullscreen = fullscreen;
-
-		SDL3.SDL_SetWindowFullscreen(
-			_window,
-			fullscreen);
+		SDL3.SDL_SetWindowFullscreen(_window, fullscreen);
 	}
 
 	public void SetMouseCapture(bool captured)
@@ -1297,9 +1242,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		if (MouseCaptured == captured)
 			return;
 
-		if (!SDL3.SDL_SetWindowRelativeMouseMode(
-			_window,
-			captured))
+		if (!SDL3.SDL_SetWindowRelativeMouseMode(_window, captured))
 		{
 			throw new InvalidOperationException(
 				$"Failed to change mouse capture mode: {SDL3.SDL_GetError()}");
@@ -1309,68 +1252,61 @@ public sealed unsafe class RenderBackend : IDisposable
 	}
 
 	public void Dispose()
-    {
-        if (_disposed)
-            return;
+	{
+		if (_disposed)
+			return;
 
-        _disposed = true;
+		_disposed = true;
+
+		_commandList.Dispose();
+
+		_pipeline.Dispose();
+		_skyPipeline.Dispose();
+
+		foreach (Shader shader in _shaders)
+			shader.Dispose();
+
+		foreach (Shader shader in _skyShaders)
+			shader.Dispose();
+
+		foreach (MaterialResources resources in _materialCache.Values)
+			resources.Dispose();
+
+		_materialCache.Clear();
 
 		foreach (Texture texture in _textureCache.Values)
-		{
 			texture.Dispose();
-		}
 
 		_textureCache.Clear();
 
-		foreach (MeshBuffer meshBuffer
-                 in _meshCache.Values)
-        {
-            meshBuffer.Dispose();
-        }
+		foreach (MeshBuffer meshBuffer in _meshCache.Values)
+			meshBuffer.Dispose();
 
-        _meshCache.Clear();
+		_meshCache.Clear();
 		_meshBoundsCache.Clear();
+		_drawBatches.Clear();
 
-		foreach (TransformResources resources
-                 in _transformCache.Values)
-        {
-            resources.Dispose();
-        }
+		_instanceBuffer?.Dispose();
+		_instanceBuffer = null;
+		_instanceBufferCapacity = 0;
+		_instanceUploadData = Array.Empty<InstanceData>();
 
-        _transformCache.Clear();
+		_cameraResourceSet.Dispose();
+		_cameraBuffer.Dispose();
+		_cameraLayout.Dispose();
 
-        _pipeline.Dispose();
-
-        foreach (Shader shader in _shaders)
-        {
-            shader.Dispose();
-        }
-
-        _transformLayout.Dispose();
-
-        _commandList.Dispose();
+		_materialLayout.Dispose();
 
 		_whiteTexture.Dispose();
 		_linearSampler.Dispose();
 
 		_skyResourceSet.Dispose();
 		_skyBuffer.Dispose();
-
-		_skyPipeline.Dispose();
-
-		foreach (Shader shader in _skyShaders)
-		{
-			shader.Dispose();
-		}
-
 		_skyLayout.Dispose();
 
 		_graphicsDevice.Dispose();
 
 		if (_window != null)
-        {
-            SDL3.SDL_DestroyWindow(
-                _window);
-        }
-    }
+			SDL3.SDL_DestroyWindow(_window);
+	}
 }
