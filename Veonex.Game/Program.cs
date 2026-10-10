@@ -23,7 +23,7 @@ const int maxHeight = 8;
 const double blockSize = 2.0;
 const double noiseScale = 0.08;
 
-const int terrainSeed = 42;
+const int terrainSeed = 67;
 const int textureSeed = 128;
 
 const double maxDeltaTime = 0.05;
@@ -36,8 +36,8 @@ const double frameTime30Fps = 1000.0 / 30.0;
 
 WindowParameters parameters = new()
 {
-	Width = 1280,
-	Height = 720,
+	Width = 1920,
+	Height = 1080,
 	Title = "Veonex - Procedural Terrain",
 	VSync = false,
 	Resizable = true,

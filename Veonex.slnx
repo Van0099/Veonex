@@ -3,5 +3,6 @@
   <Project Path="Veonex.Game/Veonex.Game.csproj" Id="c0120880-2abb-461a-b81f-2db50c8b7eb7" />
   <Project Path="Veonex.Input/Veonex.Input.csproj" Id="a06bb076-3510-4b8c-b16e-de5dfeea5d75" />
   <Project Path="Veonex.Mathematics/Veonex.Mathematics.csproj" />
+  <Project Path="Veonex.Physics/Veonex.Physics.csproj" Id="f89bfb5e-9e81-4f91-9078-aed2375df951" />
   <Project Path="Veonex.Render/Veonex.Render.csproj" />
 </Solution>
