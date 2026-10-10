@@ -60,6 +60,37 @@ public sealed unsafe class RenderBackend : IDisposable
 	private DeviceBuffer? _instanceBuffer;
 	private int _instanceBufferCapacity;
 	private InstanceData[] _instanceUploadData = new InstanceData[1];
+	private OcclusionInstanceData[] _occlusionUploadData = new OcclusionInstanceData[1];
+
+	private bool _occlusionCullingSupported;
+	private Shader[]? _occlusionDepthShaders;
+	private Shader? _hiZCopyShader;
+	private Shader? _hiZDownsampleShader;
+	private Shader? _occlusionCullShader;
+	private Pipeline? _occlusionDepthPipeline;
+	private Pipeline? _hiZCopyPipeline;
+	private Pipeline? _hiZDownsamplePipeline;
+	private Pipeline? _occlusionCullPipeline;
+	private ResourceLayout? _occlusionBuildLayout;
+	private ResourceLayout? _occlusionCullLayout;
+	private DeviceBuffer? _occlusionCullParametersBuffer;
+	private DeviceBuffer? _occlusionMetadataBuffer;
+	private DeviceBuffer? _occlusionVisibleInstanceBuffer;
+	private DeviceBuffer? _occlusionIndirectBuffer;
+	private int _occlusionBufferCapacity;
+	private IndirectDrawIndexedArguments[] _occlusionIndirectUploadData = new IndirectDrawIndexedArguments[1];
+	private ResourceSet? _occlusionCullResourceSet;
+
+	private Texture? _occlusionDepthTexture;
+	private Texture? _hiZTexture;
+	private TextureView? _occlusionDepthView;
+	private TextureView? _hiZFullView;
+	private TextureView[] _hiZMipViews = [];
+	private Framebuffer? _occlusionFramebuffer;
+	private ResourceSet? _hiZCopyResourceSet;
+	private ResourceSet[] _hiZDownsampleResourceSets = [];
+	private int _occlusionTextureWidth;
+	private int _occlusionTextureHeight;
 
 	private int _renderWidth;
 	private int _renderHeight;
@@ -89,15 +120,54 @@ public sealed unsafe class RenderBackend : IDisposable
 	private static readonly int InstanceDataSize =
 		Marshal.SizeOf<InstanceData>();
 
+	[StructLayout(LayoutKind.Sequential)]
+	private struct OcclusionInstanceData
+	{
+		public Vector4 CenterRadius;
+		public uint BatchIndex;
+		public uint OutputStart;
+		public uint Padding0;
+		public uint Padding1;
+	}
+
+	private static readonly int OcclusionInstanceDataSize =
+		Marshal.SizeOf<OcclusionInstanceData>();
+
+	private static readonly int IndexedIndirectCommandSize =
+		Marshal.SizeOf<IndirectDrawIndexedArguments>();
+
+	[StructLayout(LayoutKind.Sequential)]
+	private struct OcclusionCullParameters
+	{
+		public Matrix4x4 ViewProjection;
+		public Vector4 HiZInfo;
+		public Vector4 ClipInfo;
+
+		public OcclusionCullParameters(
+			Matrix4x4 viewProjection,
+			int width,
+			int height,
+			int mipLevels,
+			int instanceCount,
+			bool clipSpaceYInverted)
+		{
+			ViewProjection = viewProjection;
+			HiZInfo = new Vector4(width, height, mipLevels, instanceCount);
+			ClipInfo = new Vector4(clipSpaceYInverted ? 1f : 0f, 0f, 0f, 0f);
+		}
+	}
+
 	private sealed class DrawBatch
 	{
 		public Mesh Mesh { get; }
 		public Material Material { get; }
 
 		private InstanceData[] _instances = new InstanceData[4];
+		private OcclusionInstanceData[] _occlusionInstances = new OcclusionInstanceData[4];
 
 		public int InstanceCount { get; private set; }
 		public int InstanceStart { get; set; }
+		public int BatchIndex { get; set; }
 
 		public DrawBatch(Mesh mesh, Material material)
 		{
@@ -109,18 +179,27 @@ public sealed unsafe class RenderBackend : IDisposable
 		{
 			InstanceCount = 0;
 			InstanceStart = 0;
+			BatchIndex = 0;
 		}
 
-		public void AddInstance(InstanceData instance)
+		public void AddInstance(
+			InstanceData instance,
+			Vector3 worldCenter,
+			float worldRadius)
 		{
 			if (InstanceCount == _instances.Length)
 			{
-				Array.Resize(
-					ref _instances,
-					checked(_instances.Length * 2));
+				int newLength = checked(_instances.Length * 2);
+				Array.Resize(ref _instances, newLength);
+				Array.Resize(ref _occlusionInstances, newLength);
 			}
 
-			_instances[InstanceCount++] = instance;
+			_instances[InstanceCount] = instance;
+			_occlusionInstances[InstanceCount] = new OcclusionInstanceData
+			{
+				CenterRadius = new Vector4(worldCenter, worldRadius)
+			};
+			InstanceCount++;
 		}
 
 		public void CopyInstancesTo(
@@ -133,6 +212,19 @@ public sealed unsafe class RenderBackend : IDisposable
 				destination,
 				destinationStart,
 				InstanceCount);
+		}
+
+		public void CopyOcclusionInstancesTo(
+			OcclusionInstanceData[] destination,
+			int destinationStart)
+		{
+			for (int i = 0; i < InstanceCount; i++)
+			{
+				OcclusionInstanceData data = _occlusionInstances[i];
+				data.BatchIndex = (uint)BatchIndex;
+				data.OutputStart = (uint)InstanceStart;
+				destination[destinationStart + i] = data;
+			}
 		}
 	}
 
@@ -424,6 +516,281 @@ public sealed unsafe class RenderBackend : IDisposable
 		_pipeline = CreatePipeline(transparent: false);
 		_transparentPipeline = CreatePipeline(transparent: true);
 		_skyPipeline = CreateSkyPipeline();
+
+		_occlusionCullingSupported =
+			_graphicsDevice.Features.ComputeShader &&
+			_graphicsDevice.Features.StructuredBuffer &&
+			_graphicsDevice.Features.DrawIndirect &&
+			_graphicsDevice.Features.SubsetTextureView &&
+			_graphicsDevice.IsDepthRangeZeroToOne &&
+			_graphicsDevice.GetPixelFormatSupport(
+				PixelFormat.R32_Float,
+				TextureType.Texture2D,
+				TextureUsage.Sampled | TextureUsage.Storage) &&
+			_graphicsDevice.GetPixelFormatSupport(
+				PixelFormat.D32_Float_S8_UInt,
+				TextureType.Texture2D,
+				TextureUsage.DepthStencil | TextureUsage.Sampled);
+
+		if (_occlusionCullingSupported)
+		{
+			try
+			{
+				InitializeOcclusionCulling();
+				Console.WriteLine(
+					"[Veonex] GPU Hi-Z occlusion culling enabled (64+ opaque instances).");
+			}
+			catch (Exception ex)
+			{
+				DisposeOcclusionResources();
+				_occlusionCullingSupported = false;
+				Console.Error.WriteLine(
+					$"[Veonex] Hi-Z occlusion culling disabled: {ex.Message}");
+			}
+		}
+	}
+
+	private void InitializeOcclusionCulling()
+	{
+		_occlusionBuildLayout = Factory.CreateResourceLayout(
+			new ResourceLayoutDescription(
+				new ResourceLayoutElementDescription(
+					"SourceTexture", ResourceKind.TextureReadOnly, ShaderStages.Compute),
+				new ResourceLayoutElementDescription(
+					"SourceSampler", ResourceKind.Sampler, ShaderStages.Compute),
+				new ResourceLayoutElementDescription(
+					"DestinationImage", ResourceKind.TextureReadWrite, ShaderStages.Compute)));
+
+		_occlusionCullLayout = Factory.CreateResourceLayout(
+			new ResourceLayoutDescription(
+				new ResourceLayoutElementDescription(
+					"SourceInstances", ResourceKind.StructuredBufferReadOnly, ShaderStages.Compute),
+				new ResourceLayoutElementDescription(
+					"OcclusionInstances", ResourceKind.StructuredBufferReadOnly, ShaderStages.Compute),
+				new ResourceLayoutElementDescription(
+					"VisibleInstances", ResourceKind.StructuredBufferReadWrite, ShaderStages.Compute),
+				new ResourceLayoutElementDescription(
+					"IndirectCommands", ResourceKind.StructuredBufferReadWrite, ShaderStages.Compute),
+				new ResourceLayoutElementDescription(
+					"HiZTexture", ResourceKind.TextureReadOnly, ShaderStages.Compute),
+				new ResourceLayoutElementDescription(
+					"HiZSampler", ResourceKind.Sampler, ShaderStages.Compute),
+				new ResourceLayoutElementDescription(
+					"CullParameters", ResourceKind.UniformBuffer, ShaderStages.Compute)));
+
+		_occlusionCullParametersBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)Marshal.SizeOf<OcclusionCullParameters>(),
+				BufferUsage.UniformBuffer));
+
+		string shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
+		_occlusionDepthShaders = ShaderLoader.Load(
+			Factory, Path.Combine(shaderDirectory, "OcclusionDepth.ves"));
+		_hiZCopyShader = ShaderLoader.LoadCompute(
+			Factory, Path.Combine(shaderDirectory, "HiZCopy.comp"));
+		_hiZDownsampleShader = ShaderLoader.LoadCompute(
+			Factory, Path.Combine(shaderDirectory, "HiZDownsample.comp"));
+		_occlusionCullShader = ShaderLoader.LoadCompute(
+			Factory, Path.Combine(shaderDirectory, "OcclusionCull.comp"));
+
+		CreateOcclusionTextures(_renderWidth, _renderHeight);
+		_occlusionDepthPipeline = CreateOcclusionDepthPipeline();
+		_hiZCopyPipeline = Factory.CreateComputePipeline(
+			new ComputePipelineDescription(_hiZCopyShader, _occlusionBuildLayout, 8, 8, 1));
+		_hiZDownsamplePipeline = Factory.CreateComputePipeline(
+			new ComputePipelineDescription(_hiZDownsampleShader, _occlusionBuildLayout, 8, 8, 1));
+		_occlusionCullPipeline = Factory.CreateComputePipeline(
+			new ComputePipelineDescription(_occlusionCullShader, _occlusionCullLayout, 64, 1, 1));
+	}
+
+	private Pipeline CreateOcclusionDepthPipeline()
+	{
+		VertexLayoutDescription positionLayout = new(
+			new VertexElementDescription("Position", VertexElementSemantic.Position, VertexElementFormat.Float3));
+		VertexLayoutDescription normalLayout = new(
+			new VertexElementDescription("Normal", VertexElementSemantic.Normal, VertexElementFormat.Float3));
+		VertexLayoutDescription uvLayout = new(
+			new VertexElementDescription("UV", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float2));
+		VertexLayoutDescription instanceLayout = new(
+			(uint)InstanceDataSize, 1,
+			new VertexElementDescription("InstanceRow0", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 0),
+			new VertexElementDescription("InstanceRow1", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 16),
+			new VertexElementDescription("InstanceRow2", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 32),
+			new VertexElementDescription("InstanceRow3", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 48),
+			new VertexElementDescription("InstanceNormalRow0", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 64),
+			new VertexElementDescription("InstanceNormalRow1", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 80),
+			new VertexElementDescription("InstanceNormalRow2", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 96));
+
+		ShaderSetDescription shaderSet = new(
+			[positionLayout, normalLayout, uvLayout, instanceLayout],
+			_occlusionDepthShaders!);
+
+		RasterizerStateDescription rasterizer = new(
+			FaceCullMode.Back, PolygonFillMode.Solid, FrontFace.Clockwise, true, false);
+		DepthStencilStateDescription depthState = new(true, true, ComparisonKind.LessEqual);
+
+		GraphicsPipelineDescription description = new(
+			BlendStateDescription.Empty,
+			depthState,
+			rasterizer,
+			PrimitiveTopology.TriangleList,
+			shaderSet,
+			[_cameraLayout],
+			_occlusionFramebuffer!.OutputDescription);
+
+		return Factory.CreateGraphicsPipeline(description);
+	}
+
+	private void CreateOcclusionTextures(int width, int height)
+	{
+		if (_occlusionDepthTexture != null || _hiZTexture != null)
+			_graphicsDevice.WaitForIdle();
+
+		DisposeOcclusionTextures();
+		if (width <= 0 || height <= 0)
+			return;
+
+		_occlusionTextureWidth = width;
+		_occlusionTextureHeight = height;
+		_occlusionDepthTexture = Factory.CreateTexture(
+			TextureDescription.Texture2D(
+				(uint)width, (uint)height, 1, 1, PixelFormat.D32_Float_S8_UInt,
+				TextureUsage.DepthStencil | TextureUsage.Sampled));
+		_occlusionFramebuffer = Factory.CreateFramebuffer(
+			new FramebufferDescription(_occlusionDepthTexture));
+		_occlusionDepthView = Factory.CreateTextureView(_occlusionDepthTexture);
+
+		int mipLevels = 1 + (int)MathF.Floor(MathF.Log2(Math.Max(width, height)));
+		_hiZTexture = Factory.CreateTexture(
+			TextureDescription.Texture2D(
+				(uint)width, (uint)height, (uint)mipLevels, 1, PixelFormat.R32_Float,
+				TextureUsage.Sampled | TextureUsage.Storage));
+		_hiZFullView = Factory.CreateTextureView(
+			new TextureViewDescription(
+				_hiZTexture, PixelFormat.R32_Float, 0, (uint)mipLevels, 0, 1));
+		_hiZMipViews = new TextureView[mipLevels];
+		for (int mip = 0; mip < mipLevels; mip++)
+		{
+			_hiZMipViews[mip] = Factory.CreateTextureView(
+				new TextureViewDescription(
+					_hiZTexture, PixelFormat.R32_Float, (uint)mip, 1, 0, 1));
+		}
+
+		_hiZCopyResourceSet = Factory.CreateResourceSet(
+			new ResourceSetDescription(
+				_occlusionBuildLayout!, _occlusionDepthView, _linearSampler, _hiZMipViews[0]));
+
+		_hiZDownsampleResourceSets = new ResourceSet[Math.Max(0, mipLevels - 1)];
+		for (int mip = 1; mip < mipLevels; mip++)
+		{
+			_hiZDownsampleResourceSets[mip - 1] = Factory.CreateResourceSet(
+				new ResourceSetDescription(
+					_occlusionBuildLayout!, _hiZMipViews[mip - 1], _linearSampler, _hiZMipViews[mip]));
+		}
+
+		RecreateOcclusionCullResourceSet();
+	}
+
+	private void DisposeOcclusionTextures()
+	{
+		_hiZCopyResourceSet?.Dispose();
+		_hiZCopyResourceSet = null;
+		foreach (ResourceSet set in _hiZDownsampleResourceSets)
+			set.Dispose();
+		_hiZDownsampleResourceSets = [];
+		_occlusionCullResourceSet?.Dispose();
+		_occlusionCullResourceSet = null;
+		_occlusionFramebuffer?.Dispose();
+		_occlusionFramebuffer = null;
+		_occlusionDepthView?.Dispose();
+		_occlusionDepthView = null;
+		_hiZFullView?.Dispose();
+		_hiZFullView = null;
+		foreach (TextureView view in _hiZMipViews)
+			view.Dispose();
+		_hiZMipViews = [];
+		_occlusionDepthTexture?.Dispose();
+		_occlusionDepthTexture = null;
+		_hiZTexture?.Dispose();
+		_hiZTexture = null;
+		_occlusionTextureWidth = 0;
+		_occlusionTextureHeight = 0;
+	}
+
+	private void EnsureOcclusionTextures()
+	{
+		if (!_occlusionCullingSupported ||
+			(_occlusionTextureWidth == _renderWidth && _occlusionTextureHeight == _renderHeight))
+			return;
+
+		CreateOcclusionTextures(_renderWidth, _renderHeight);
+	}
+
+	private void EnsureOcclusionBuffersCapacity(int requiredCapacity)
+	{
+		if (_occlusionMetadataBuffer != null && _occlusionVisibleInstanceBuffer != null &&
+			_occlusionIndirectBuffer != null && _occlusionBufferCapacity >= requiredCapacity)
+			return;
+
+		int capacity = Math.Max(4096, _occlusionBufferCapacity);
+		while (capacity < requiredCapacity)
+		{
+			if (capacity > int.MaxValue / 2)
+			{
+				capacity = requiredCapacity;
+				break;
+			}
+			capacity *= 2;
+		}
+
+		_occlusionCullResourceSet?.Dispose();
+		_occlusionCullResourceSet = null;
+		_occlusionMetadataBuffer?.Dispose();
+		_occlusionVisibleInstanceBuffer?.Dispose();
+		_occlusionIndirectBuffer?.Dispose();
+
+		_occlusionMetadataBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				checked((uint)(capacity * OcclusionInstanceDataSize)),
+				BufferUsage.StructuredBufferReadOnly,
+				(uint)OcclusionInstanceDataSize));
+		_occlusionVisibleInstanceBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				checked((uint)(capacity * InstanceDataSize)),
+				BufferUsage.VertexBuffer | BufferUsage.StructuredBufferReadWrite,
+				(uint)InstanceDataSize));
+		_occlusionIndirectBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				checked((uint)(capacity * IndexedIndirectCommandSize)),
+				BufferUsage.StructuredBufferReadWrite | BufferUsage.IndirectBuffer,
+				(uint)IndexedIndirectCommandSize));
+		_occlusionBufferCapacity = capacity;
+		RecreateOcclusionCullResourceSet();
+	}
+
+	private void RecreateOcclusionCullResourceSet()
+	{
+		_occlusionCullResourceSet?.Dispose();
+		_occlusionCullResourceSet = null;
+		if (_occlusionCullLayout == null ||
+			_instanceBuffer == null ||
+			_occlusionMetadataBuffer == null ||
+			_occlusionVisibleInstanceBuffer == null ||
+			_occlusionIndirectBuffer == null ||
+			_hiZFullView == null ||
+			_occlusionCullParametersBuffer == null)
+			return;
+
+		_occlusionCullResourceSet = Factory.CreateResourceSet(
+			new ResourceSetDescription(
+				_occlusionCullLayout,
+				_instanceBuffer!,
+				_occlusionMetadataBuffer,
+				_occlusionVisibleInstanceBuffer,
+				_occlusionIndirectBuffer,
+				_hiZFullView,
+				_linearSampler,
+				_occlusionCullParametersBuffer));
 	}
 
 	private SDL_Window* CreateWindow()
@@ -788,7 +1155,7 @@ public sealed unsafe class RenderBackend : IDisposable
 					_drawBatches.Add(key, batch);
 				}
 
-				batch.AddInstance(instance);
+				batch.AddInstance(instance, worldCenter, worldRadius);
 			}
 		}
 
@@ -810,11 +1177,14 @@ public sealed unsafe class RenderBackend : IDisposable
 		_sortedTransparentBatches.Sort(static (left, right) =>
 			right.SortDistanceSquared.CompareTo(left.SortDistanceSquared));
 
+		int opaqueInstanceCount = 0;
+
 		if (totalInstanceCount > 0)
 		{
 			EnsureInstanceUploadCapacity(totalInstanceCount);
 
 			int instanceOffset = 0;
+			int batchIndex = 0;
 
 			foreach (DrawBatch batch in _drawBatches.Values)
 			{
@@ -822,9 +1192,22 @@ public sealed unsafe class RenderBackend : IDisposable
 					continue;
 
 				batch.InstanceStart = instanceOffset;
+				batch.BatchIndex = batchIndex;
 				batch.CopyInstancesTo(_instanceUploadData, instanceOffset);
+				batch.CopyOcclusionInstancesTo(_occlusionUploadData, instanceOffset);
+				_occlusionIndirectUploadData[batchIndex] = new IndirectDrawIndexedArguments
+				{
+					IndexCount = checked((uint)batch.Mesh.Data.IndexCount),
+					InstanceCount = 0,
+					FirstIndex = 0,
+					VertexOffset = 0,
+					FirstInstance = 0
+				};
+				batchIndex++;
 				instanceOffset += batch.InstanceCount;
 			}
+
+			opaqueInstanceCount = instanceOffset;
 
 			foreach (TransparentBatch batch in _sortedTransparentBatches)
 			{
@@ -840,6 +1223,44 @@ public sealed unsafe class RenderBackend : IDisposable
 				0,
 				ref _instanceUploadData[0],
 				checked((uint)(totalInstanceCount * InstanceDataSize)));
+
+			if (_occlusionCullingSupported && opaqueInstanceCount >= 64)
+			{
+				EnsureOcclusionBuffersCapacity(totalInstanceCount);
+				_graphicsDevice.UpdateBuffer(
+					_occlusionMetadataBuffer!, 0, ref _occlusionUploadData[0],
+					checked((uint)(opaqueInstanceCount * OcclusionInstanceDataSize)));
+				int opaqueBatchCount = 0;
+				foreach (DrawBatch batch in _drawBatches.Values)
+				{
+					if (batch.InstanceCount > 0)
+						opaqueBatchCount++;
+				}
+				if (opaqueBatchCount > 0)
+				{
+					_graphicsDevice.UpdateBuffer(
+						_occlusionIndirectBuffer!, 0, ref _occlusionIndirectUploadData[0],
+						checked((uint)(opaqueBatchCount * IndexedIndirectCommandSize)));
+				}
+			}
+		}
+
+		bool useOcclusionCulling =
+			_occlusionCullingSupported && opaqueInstanceCount >= 64;
+
+		if (useOcclusionCulling)
+		{
+			EnsureOcclusionTextures();
+			_graphicsDevice.UpdateBuffer(
+				_occlusionCullParametersBuffer!,
+				0,
+				new OcclusionCullParameters(
+					viewProjection,
+					_renderWidth,
+					_renderHeight,
+					_hiZMipViews.Length,
+					opaqueInstanceCount,
+					_graphicsDevice.IsClipSpaceYInverted));
 		}
 
 		_graphicsDevice.UpdateBuffer(
@@ -857,6 +1278,48 @@ public sealed unsafe class RenderBackend : IDisposable
 		int transparentDrawCalls = 0;
 
 		_commandList.Begin();
+
+		if (useOcclusionCulling)
+		{
+			_commandList.SetFramebuffer(_occlusionFramebuffer!);
+			_commandList.SetFullViewports();
+			_commandList.ClearDepthStencil(1.0f);
+			_commandList.SetPipeline(_occlusionDepthPipeline!);
+			_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
+
+			foreach (DrawBatch batch in _drawBatches.Values)
+			{
+				if (batch.InstanceCount == 0)
+					continue;
+
+				MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
+				_commandList.SetVertexBuffer(0, meshBuffer.PositionBuffer);
+				if (meshBuffer.NormalBuffer != null)
+					_commandList.SetVertexBuffer(1, meshBuffer.NormalBuffer);
+				if (meshBuffer.UVBuffer != null)
+					_commandList.SetVertexBuffer(2, meshBuffer.UVBuffer);
+				_commandList.SetVertexBuffer(3, _instanceBuffer!, checked((uint)(batch.InstanceStart * InstanceDataSize)));
+				_commandList.SetIndexBuffer(meshBuffer.IndexBuffer, IndexFormat.UInt32);
+				_commandList.DrawIndexed(meshBuffer.IndexCount, (uint)batch.InstanceCount, 0, 0, 0);
+			}
+
+			_commandList.SetPipeline(_hiZCopyPipeline!);
+			_commandList.SetComputeResourceSet(0, _hiZCopyResourceSet!);
+			_commandList.Dispatch((uint)((_renderWidth + 7) / 8), (uint)((_renderHeight + 7) / 8), 1);
+
+			_commandList.SetPipeline(_hiZDownsamplePipeline!);
+			for (int mip = 1; mip < _hiZMipViews.Length; mip++)
+			{
+				_commandList.SetComputeResourceSet(0, _hiZDownsampleResourceSets[mip - 1]);
+				int mipWidth = Math.Max(1, _renderWidth >> mip);
+				int mipHeight = Math.Max(1, _renderHeight >> mip);
+				_commandList.Dispatch((uint)((mipWidth + 7) / 8), (uint)((mipHeight + 7) / 8), 1);
+			}
+
+			_commandList.SetPipeline(_occlusionCullPipeline!);
+			_commandList.SetComputeResourceSet(0, _occlusionCullResourceSet!);
+			_commandList.Dispatch((uint)((opaqueInstanceCount + 63) / 64), 1, 1);
+		}
 
 		_commandList.SetFramebuffer(
 			_graphicsDevice.SwapchainFramebuffer);
@@ -924,19 +1387,32 @@ public sealed unsafe class RenderBackend : IDisposable
 
 			_commandList.SetVertexBuffer(
 				3,
-				_instanceBuffer!,
+				useOcclusionCulling
+					? _occlusionVisibleInstanceBuffer!
+					: _instanceBuffer!,
 				instanceBufferOffset);
 
 			_commandList.SetIndexBuffer(
 				meshBuffer.IndexBuffer,
 				IndexFormat.UInt32);
 
-			_commandList.DrawIndexed(
-				meshBuffer.IndexCount,
-				(uint)batch.InstanceCount,
-				0,
-				0,
-				0);
+			if (useOcclusionCulling)
+			{
+				_commandList.DrawIndexedIndirect(
+					_occlusionIndirectBuffer!,
+					checked((uint)(batch.BatchIndex * IndexedIndirectCommandSize)),
+					1,
+					(uint)IndexedIndirectCommandSize);
+			}
+			else
+			{
+				_commandList.DrawIndexed(
+					meshBuffer.IndexCount,
+					(uint)batch.InstanceCount,
+					0,
+					0,
+					0);
+			}
 			opaqueDrawCalls++;
 		}
 
@@ -1110,10 +1586,14 @@ public sealed unsafe class RenderBackend : IDisposable
 
 	private void EnsureInstanceUploadCapacity(int requiredCount)
 	{
-		if (_instanceUploadData.Length >= requiredCount)
+		if (_instanceUploadData.Length >= requiredCount &&
+			_occlusionUploadData.Length >= requiredCount &&
+			_occlusionIndirectUploadData.Length >= requiredCount)
 			return;
 
-		int capacity = Math.Max(1, _instanceUploadData.Length);
+		int capacity = Math.Max(1, Math.Max(
+			Math.Max(_instanceUploadData.Length, _occlusionUploadData.Length),
+			_occlusionIndirectUploadData.Length));
 
 		while (capacity < requiredCount)
 		{
@@ -1127,6 +1607,8 @@ public sealed unsafe class RenderBackend : IDisposable
 		}
 
 		Array.Resize(ref _instanceUploadData, capacity);
+		Array.Resize(ref _occlusionUploadData, capacity);
+		Array.Resize(ref _occlusionIndirectUploadData, capacity);
 	}
 
 	private void EnsureInstanceBufferCapacity(int requiredCapacity)
@@ -1154,14 +1636,28 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		uint bufferSize = checked((uint)(capacity * InstanceDataSize));
 
+		BufferUsage instanceBufferUsage = BufferUsage.VertexBuffer;
+		uint instanceStride = 0;
+		if (_occlusionCullingSupported)
+		{
+			instanceBufferUsage |= BufferUsage.StructuredBufferReadOnly;
+			instanceStride = (uint)InstanceDataSize;
+		}
+
 		DeviceBuffer newBuffer = Factory.CreateBuffer(
-			new BufferDescription(
-				bufferSize,
-				BufferUsage.VertexBuffer));
+			new BufferDescription(bufferSize, instanceBufferUsage, instanceStride));
+
+		if (_occlusionCullingSupported)
+		{
+			_occlusionCullResourceSet?.Dispose();
+			_occlusionCullResourceSet = null;
+		}
 
 		_instanceBuffer?.Dispose();
 		_instanceBuffer = newBuffer;
 		_instanceBufferCapacity = capacity;
+		if (_occlusionCullingSupported)
+			RecreateOcclusionCullResourceSet();
 	}
 
 	private Texture GetOrCreateTexture(string path)
@@ -1553,6 +2049,50 @@ public sealed unsafe class RenderBackend : IDisposable
 		MouseCaptured = captured;
 	}
 
+	private void DisposeOcclusionResources()
+	{
+		_occlusionCullResourceSet?.Dispose();
+		_occlusionCullResourceSet = null;
+		DisposeOcclusionTextures();
+
+		_occlusionDepthPipeline?.Dispose();
+		_occlusionDepthPipeline = null;
+		_hiZCopyPipeline?.Dispose();
+		_hiZCopyPipeline = null;
+		_hiZDownsamplePipeline?.Dispose();
+		_hiZDownsamplePipeline = null;
+		_occlusionCullPipeline?.Dispose();
+		_occlusionCullPipeline = null;
+
+		if (_occlusionDepthShaders != null)
+		{
+			foreach (Shader shader in _occlusionDepthShaders)
+				shader.Dispose();
+			_occlusionDepthShaders = null;
+		}
+		_hiZCopyShader?.Dispose();
+		_hiZCopyShader = null;
+		_hiZDownsampleShader?.Dispose();
+		_hiZDownsampleShader = null;
+		_occlusionCullShader?.Dispose();
+		_occlusionCullShader = null;
+
+		_occlusionMetadataBuffer?.Dispose();
+		_occlusionMetadataBuffer = null;
+		_occlusionVisibleInstanceBuffer?.Dispose();
+		_occlusionVisibleInstanceBuffer = null;
+		_occlusionIndirectBuffer?.Dispose();
+		_occlusionIndirectBuffer = null;
+		_occlusionBufferCapacity = 0;
+		_occlusionCullParametersBuffer?.Dispose();
+		_occlusionCullParametersBuffer = null;
+
+		_occlusionBuildLayout?.Dispose();
+		_occlusionBuildLayout = null;
+		_occlusionCullLayout?.Dispose();
+		_occlusionCullLayout = null;
+	}
+
 	public void Dispose()
 	{
 		if (_disposed)
@@ -1565,6 +2105,8 @@ public sealed unsafe class RenderBackend : IDisposable
 		_pipeline.Dispose();
 		_transparentPipeline.Dispose();
 		_skyPipeline.Dispose();
+
+		DisposeOcclusionResources();
 
 		foreach (Shader shader in _shaders)
 			shader.Dispose();
@@ -1596,6 +2138,8 @@ public sealed unsafe class RenderBackend : IDisposable
 		_instanceBuffer = null;
 		_instanceBufferCapacity = 0;
 		_instanceUploadData = Array.Empty<InstanceData>();
+		_occlusionUploadData = Array.Empty<OcclusionInstanceData>();
+		_occlusionIndirectUploadData = Array.Empty<IndirectDrawIndexedArguments>();
 
 		_cameraResourceSet.Dispose();
 		_cameraBuffer.Dispose();

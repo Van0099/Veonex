@@ -1,0 +1,186 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct InstanceData
+{
+    mat4 Model;
+    vec4 NormalRow0;
+    vec4 NormalRow1;
+    vec4 NormalRow2;
+};
+
+struct OcclusionInstance
+{
+    vec4 CenterRadius;
+    uvec4 Info;
+};
+
+struct DrawIndexedCommand
+{
+    uint IndexCount;
+    uint InstanceCount;
+    uint FirstIndex;
+    int VertexOffset;
+    uint FirstInstance;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer SourceInstanceBuffer
+{
+    InstanceData SourceInstances[];
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer OcclusionInstanceBuffer
+{
+    OcclusionInstance Instances[];
+};
+
+layout(std430, set = 0, binding = 2) writeonly buffer VisibleInstanceBuffer
+{
+    InstanceData VisibleInstances[];
+};
+
+layout(std430, set = 0, binding = 3) buffer IndirectCommandBuffer
+{
+    DrawIndexedCommand Commands[];
+};
+
+layout(set = 0, binding = 4) uniform texture2D HiZTexture;
+layout(set = 0, binding = 5) uniform sampler HiZSampler;
+
+layout(std140, set = 0, binding = 6) uniform CullParameters
+{
+    mat4 ViewProjection;
+    vec4 HiZInfo;
+    vec4 ClipInfo;
+};
+
+bool IsOccluded(vec4 centerRadius)
+{
+    vec3 center = centerRadius.xyz;
+    float radius = max(centerRadius.w, 0.0);
+
+    float width = HiZInfo.x;
+    float height = HiZInfo.y;
+    int mipCount = int(HiZInfo.z);
+
+    vec2 minPixel = vec2(1e20);
+    vec2 maxPixel = vec2(-1e20);
+
+    float nearestDepth = 1.0;
+
+    for (int corner = 0; corner < 8; corner++)
+    {
+        vec3 offset = vec3(
+            (corner & 1) == 0 ? -radius : radius,
+            (corner & 2) == 0 ? -radius : radius,
+            (corner & 4) == 0 ? -radius : radius);
+
+        vec4 clip = ViewProjection *
+            vec4(center + offset, 1.0);
+
+        if (clip.w <= 0.0001 ||
+            clip.z <= 0.0 ||
+            clip.z >= clip.w)
+        {
+            return false;
+        }
+
+        vec3 ndc = clip.xyz / clip.w;
+
+        float pixelY = ClipInfo.x > 0.5
+            ? (ndc.y * 0.5 + 0.5) * height
+            : (0.5 - ndc.y * 0.5) * height;
+
+        vec2 pixel = vec2(
+            (ndc.x * 0.5 + 0.5) * width,
+            pixelY);
+
+        minPixel = min(minPixel, pixel);
+        maxPixel = max(maxPixel, pixel);
+
+        nearestDepth = min(nearestDepth, ndc.z);
+    }
+
+    if (minPixel.x < 0.0 ||
+        minPixel.y < 0.0 ||
+        maxPixel.x >= width ||
+        maxPixel.y >= height)
+    {
+        return false;
+    }
+
+    vec2 extent = max(
+        maxPixel - minPixel,
+        vec2(1.0));
+
+    float largestExtent = max(extent.x, extent.y);
+
+    int mip = clamp(
+        int(floor(log2(largestExtent))),
+        0,
+        mipCount - 1);
+
+    ivec2 mipSize = textureSize(
+        sampler2D(HiZTexture, HiZSampler),
+        mip);
+
+    ivec2 minTexel = ivec2(
+        floor(minPixel / vec2(width, height) * vec2(mipSize)));
+
+    ivec2 maxTexel = ivec2(
+        floor(maxPixel / vec2(width, height) * vec2(mipSize)));
+
+    minTexel = clamp(
+        minTexel,
+        ivec2(0),
+        mipSize - ivec2(1));
+
+    maxTexel = clamp(
+        maxTexel,
+        ivec2(0),
+        mipSize - ivec2(1));
+
+    float farthestOccluder = 0.0;
+
+    for (int y = minTexel.y; y <= maxTexel.y; y++)
+    {
+        for (int x = minTexel.x; x <= maxTexel.x; x++)
+        {
+            float depth = texelFetch(
+                sampler2D(HiZTexture, HiZSampler),
+                ivec2(x, y),
+                mip).r;
+
+            farthestOccluder = max(
+                farthestOccluder,
+                depth);
+        }
+    }
+
+    return nearestDepth > farthestOccluder + 0.001;
+}
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    uint instanceCount = uint(HiZInfo.w);
+
+    if (index >= instanceCount)
+        return;
+
+    OcclusionInstance instance = Instances[index];
+
+    if (IsOccluded(instance.CenterRadius))
+        return;
+
+    uint batchIndex = instance.Info.x;
+    uint outputStart = instance.Info.y;
+
+    uint outputIndex = atomicAdd(
+        Commands[batchIndex].InstanceCount,
+        1u);
+
+    VisibleInstances[outputStart + outputIndex] =
+        SourceInstances[index];
+}

@@ -1,0 +1,26 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D SourceTexture;
+layout(set = 0, binding = 1) uniform sampler SourceSampler;
+layout(r32f, set = 0, binding = 2) writeonly uniform image2D DestinationImage;
+
+void main()
+{
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(DestinationImage);
+
+    if (pixel.x >= size.x || pixel.y >= size.y)
+        return;
+
+    float depth = texelFetch(
+        sampler2D(SourceTexture, SourceSampler),
+        pixel,
+        0).r;
+
+    imageStore(
+        DestinationImage,
+        pixel,
+        vec4(depth, 0.0, 0.0, 1.0));
+}

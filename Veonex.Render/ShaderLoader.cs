@@ -6,96 +6,92 @@ namespace Veonex.Render;
 
 public static class ShaderLoader
 {
-    public static Shader[] Load(
-        ResourceFactory factory,
-        string path)
-    {
-        if (factory == null)
-            throw new ArgumentNullException(nameof(factory));
+	public static Shader[] Load(
+		ResourceFactory factory,
+		string path)
+	{
+		if (factory == null)
+			throw new ArgumentNullException(nameof(factory));
 
-        if (string.IsNullOrWhiteSpace(path))
-            throw new ArgumentException(
-                "Shader path cannot be empty.",
-                nameof(path));
+		if (string.IsNullOrWhiteSpace(path))
+			throw new ArgumentException(
+				"Shader path cannot be empty.",
+				nameof(path));
 
-        if (!File.Exists(path))
-        {
-            throw new FileNotFoundException(
-                $"Shader file was not found: {path}",
-                path);
-        }
+		if (!File.Exists(path))
+		{
+			throw new FileNotFoundException(
+				$"Shader file was not found: {path}",
+				path);
+		}
 
-        string source =
-            File.ReadAllText(path);
+		string source = File.ReadAllText(path);
 
-        const string vertexMarker = "###VERT";
-        const string fragmentMarker = "###FRAG";
+		const string vertexMarker = "###VERT";
+		const string fragmentMarker = "###FRAG";
 
-        int vertexIndex =
-            source.IndexOf(
-                vertexMarker,
-                StringComparison.Ordinal);
+		int vertexIndex = source.IndexOf(vertexMarker, StringComparison.Ordinal);
+		int fragmentIndex = source.IndexOf(fragmentMarker, StringComparison.Ordinal);
 
-        int fragmentIndex =
-            source.IndexOf(
-                fragmentMarker,
-                StringComparison.Ordinal);
+		if (vertexIndex < 0)
+			throw new InvalidDataException($"Shader '{path}' does not contain {vertexMarker}.");
+		if (fragmentIndex < 0)
+			throw new InvalidDataException($"Shader '{path}' does not contain {fragmentMarker}.");
+		if (fragmentIndex <= vertexIndex)
+		{
+			throw new InvalidDataException(
+				$"Shader '{path}' has invalid section order. " +
+				$"{vertexMarker} must come before {fragmentMarker}.");
+		}
 
-        if (vertexIndex < 0)
-        {
-            throw new InvalidDataException(
-                $"Shader '{path}' does not contain {vertexMarker}.");
-        }
+		string vertexSource = source[(vertexIndex + vertexMarker.Length)..fragmentIndex].Trim();
+		string fragmentSource = source[(fragmentIndex + fragmentMarker.Length)..].Trim();
 
-        if (fragmentIndex < 0)
-        {
-            throw new InvalidDataException(
-                $"Shader '{path}' does not contain {fragmentMarker}.");
-        }
+		if (vertexSource.Length == 0)
+			throw new InvalidDataException($"Shader '{path}' has an empty vertex shader.");
+		if (fragmentSource.Length == 0)
+			throw new InvalidDataException($"Shader '{path}' has an empty fragment shader.");
 
-        if (fragmentIndex <= vertexIndex)
-        {
-            throw new InvalidDataException(
-                $"Shader '{path}' has invalid section order. " +
-                $"{vertexMarker} must come before {fragmentMarker}.");
-        }
+		ShaderDescription vertexShader = new(
+			ShaderStages.Vertex,
+			Encoding.UTF8.GetBytes(vertexSource),
+			"main");
+		ShaderDescription fragmentShader = new(
+			ShaderStages.Fragment,
+			Encoding.UTF8.GetBytes(fragmentSource),
+			"main");
 
-        string vertexSource =
-            source[
-                (vertexIndex + vertexMarker.Length)..fragmentIndex]
-            .Trim();
+		return factory.CreateFromSpirv(vertexShader, fragmentShader);
+	}
 
-        string fragmentSource =
-            source[
-                (fragmentIndex + fragmentMarker.Length)..]
-            .Trim();
+	public static Shader LoadCompute(
+		ResourceFactory factory,
+		string path)
+	{
+		if (factory == null)
+			throw new ArgumentNullException(nameof(factory));
 
-        if (vertexSource.Length == 0)
-        {
-            throw new InvalidDataException(
-                $"Shader '{path}' has an empty vertex shader.");
-        }
+		if (string.IsNullOrWhiteSpace(path))
+			throw new ArgumentException(
+				"Shader path cannot be empty.",
+				nameof(path));
 
-        if (fragmentSource.Length == 0)
-        {
-            throw new InvalidDataException(
-                $"Shader '{path}' has an empty fragment shader.");
-        }
+		if (!File.Exists(path))
+		{
+			throw new FileNotFoundException(
+				$"Compute shader was not found: {path}",
+				path);
+		}
 
-        ShaderDescription vertexShader =
-            new(
-                ShaderStages.Vertex,
-                Encoding.UTF8.GetBytes(vertexSource),
-                "main");
+		string source = File.ReadAllText(path).Trim();
+		if (source.Length == 0)
+			throw new InvalidDataException($"Compute shader '{path}' is empty.");
 
-        ShaderDescription fragmentShader =
-            new(
-                ShaderStages.Fragment,
-                Encoding.UTF8.GetBytes(fragmentSource),
-                "main");
+		ShaderDescription description = new(
+			ShaderStages.Compute,
+			Encoding.UTF8.GetBytes(source),
+			"main");
 
-        return factory.CreateFromSpirv(
-            vertexShader,
-            fragmentShader);
-    }
+		return factory.CreateFromSpirv(description);
+	}
 }
