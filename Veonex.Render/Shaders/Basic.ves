@@ -37,7 +37,6 @@ void main()
         InstanceNormalRow2.xyz);
 
     FragNormal = normalize(normalMatrix * Normal);
-
     FragUV = UV;
 }
 
@@ -47,6 +46,7 @@ void main()
 layout(set = 1, binding = 0) uniform MaterialBuffer
 {
     vec4 AlbedoColor;
+    vec4 MaterialParameters;
 };
 
 layout(set = 1, binding = 1) uniform texture2D AlbedoTexture;
@@ -75,8 +75,9 @@ void main()
         FragUV);
 
     vec4 finalColor = textureColor * AlbedoColor;
+    float opacity = clamp(MaterialParameters.x, 0.0, 1.0);
 
     OutColor = vec4(
         finalColor.rgb * lighting,
-        finalColor.a);
+        finalColor.a * opacity);
 }

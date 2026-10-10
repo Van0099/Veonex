@@ -1,5 +1,6 @@
 ﻿using NeoVeldrid;
 using SDL;
+using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Veonex.Core;
@@ -27,6 +28,7 @@ public sealed unsafe class RenderBackend : IDisposable
 
 	private readonly Shader[] _shaders;
 	private readonly Pipeline _pipeline;
+	private readonly Pipeline _transparentPipeline;
 
 	private readonly Shader[] _skyShaders;
 	private readonly Pipeline _skyPipeline;
@@ -47,12 +49,14 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly Dictionary<Guid, MaterialResources> _materialCache = [];
 	private readonly Dictionary<string, Texture> _textureCache =
 		new(StringComparer.OrdinalIgnoreCase);
+	private readonly Dictionary<string, bool> _textureAlphaCache =
+		new(StringComparer.OrdinalIgnoreCase);
 	private readonly Dictionary<Guid, MeshBounds> _meshBoundsCache = [];
 
-	// Батч — все сущности с одинаковой парой Mesh.Id + Material.Id.
 	private readonly Dictionary<BatchKey, DrawBatch> _drawBatches = [];
+	private readonly Dictionary<BatchKey, TransparentBatch> _transparentBatches = [];
+	private readonly List<TransparentBatch> _sortedTransparentBatches = [];
 
-	// Один общий GPU-буфер содержит данные всех экземпляров кадра.
 	private DeviceBuffer? _instanceBuffer;
 	private int _instanceBufferCapacity;
 	private InstanceData[] _instanceUploadData = new InstanceData[1];
@@ -64,6 +68,7 @@ public sealed unsafe class RenderBackend : IDisposable
 	public bool MouseCaptured { get; private set; }
 
 	private bool _disposed;
+	private long _lastDrawCallLogTime;
 
 	public ResourceFactory Factory =>
 		_graphicsDevice.ResourceFactory;
@@ -131,6 +136,90 @@ public sealed unsafe class RenderBackend : IDisposable
 		}
 	}
 
+	private readonly struct TransparentInstance
+	{
+		public InstanceData Data { get; }
+		public float DistanceSquared { get; }
+
+		public TransparentInstance(InstanceData data, float distanceSquared)
+		{
+			Data = data;
+			DistanceSquared = distanceSquared;
+		}
+	}
+
+	private sealed class TransparentInstanceComparer : IComparer<TransparentInstance>
+	{
+		public static readonly TransparentInstanceComparer Instance = new();
+
+		public int Compare(TransparentInstance left, TransparentInstance right) =>
+			right.DistanceSquared.CompareTo(left.DistanceSquared);
+	}
+
+	private sealed class TransparentBatch
+	{
+		public Mesh Mesh { get; }
+		public Material Material { get; }
+
+		private TransparentInstance[] _instances = new TransparentInstance[4];
+		private double _distanceSum;
+
+		public int InstanceCount { get; private set; }
+		public int InstanceStart { get; set; }
+		public float SortDistanceSquared { get; private set; }
+
+		public TransparentBatch(Mesh mesh, Material material)
+		{
+			Mesh = mesh;
+			Material = material;
+		}
+
+		public void Reset()
+		{
+			InstanceCount = 0;
+			InstanceStart = 0;
+			_distanceSum = 0.0;
+			SortDistanceSquared = 0f;
+		}
+
+		public void AddInstance(InstanceData instance, float distanceSquared)
+		{
+			if (InstanceCount == _instances.Length)
+			{
+				Array.Resize(
+					ref _instances,
+					checked(_instances.Length * 2));
+			}
+
+			_instances[InstanceCount++] = new TransparentInstance(
+				instance,
+				distanceSquared);
+			_distanceSum += distanceSquared;
+		}
+
+		public void SortInstances()
+		{
+			if (InstanceCount == 0)
+				return;
+
+			Array.Sort(
+				_instances,
+				0,
+				InstanceCount,
+				TransparentInstanceComparer.Instance);
+
+			SortDistanceSquared = (float)(_distanceSum / InstanceCount);
+		}
+
+		public void CopyInstancesTo(
+			InstanceData[] destination,
+			int destinationStart)
+		{
+			for (int i = 0; i < InstanceCount; i++)
+				destination[destinationStart + i] = _instances[i].Data;
+		}
+	}
+
 	private sealed class MaterialResources : IDisposable
 	{
 		public DeviceBuffer Buffer { get; }
@@ -151,7 +240,6 @@ public sealed unsafe class RenderBackend : IDisposable
 		}
 	}
 
-	// Buffers
 
 	[StructLayout(LayoutKind.Sequential)]
 	private struct CameraBuffer
@@ -168,10 +256,12 @@ public sealed unsafe class RenderBackend : IDisposable
 	private struct MaterialBuffer
 	{
 		public Vector4 AlbedoColor;
+		public Vector4 Parameters;
 
-		public MaterialBuffer(Vector4 albedoColor)
+		public MaterialBuffer(Vector4 albedoColor, float opacity)
 		{
 			AlbedoColor = albedoColor;
+			Parameters = new Vector4(opacity, 0f, 0f, 0f);
 		}
 	}
 
@@ -331,7 +421,8 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_skyShaders = ShaderLoader.Load(Factory, skyShaderPath);
 
-		_pipeline = CreatePipeline();
+		_pipeline = CreatePipeline(transparent: false);
+		_transparentPipeline = CreatePipeline(transparent: true);
 		_skyPipeline = CreateSkyPipeline();
 	}
 
@@ -451,7 +542,7 @@ public sealed unsafe class RenderBackend : IDisposable
 			swapchainDescription);
 	}
 
-	private Pipeline CreatePipeline()
+	private Pipeline CreatePipeline(bool transparent)
 	{
 		VertexLayoutDescription positionLayout = new(
 			new VertexElementDescription(
@@ -528,11 +619,15 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		DepthStencilStateDescription depthState = new(
 			depthTestEnabled: true,
-			depthWriteEnabled: true,
+			depthWriteEnabled: !transparent,
 			comparisonKind: ComparisonKind.LessEqual);
 
+		BlendStateDescription blendState = transparent
+			? BlendStateDescription.SingleAlphaBlend
+			: BlendStateDescription.SingleOverrideBlend;
+
 		GraphicsPipelineDescription description = new(
-			BlendStateDescription.SingleOverrideBlend,
+			blendState,
 			depthState,
 			rasterizer,
 			PrimitiveTopology.TriangleList,
@@ -602,10 +697,19 @@ public sealed unsafe class RenderBackend : IDisposable
 		FrustumPlane[] frustumPlanes =
 			CreateFrustumPlanes(viewProjection);
 
-		// Пересобираем CPU-батчи. На этом этапе никаких DrawIndexed
-		// ещё не вызывается: сначала группируем одинаковые меши и материалы.
 		foreach (DrawBatch batch in _drawBatches.Values)
 			batch.Reset();
+
+		foreach (TransparentBatch batch in _transparentBatches.Values)
+			batch.Reset();
+
+		_sortedTransparentBatches.Clear();
+
+		Transform cameraTransform = camera.Entity.Get<Transform>();
+		Vector3 cameraPosition = new(
+			(float)cameraTransform.Position.X,
+			(float)cameraTransform.Position.Y,
+			(float)cameraTransform.Position.Z);
 
 		foreach (Entity entity in scene.Entities)
 		{
@@ -625,19 +729,15 @@ public sealed unsafe class RenderBackend : IDisposable
 
 			Mesh mesh = renderer.Mesh;
 			Material material = renderer.Material;
+
+			// Полностью прозрачные материалы не отправляем на отрисовку.
+			if (material.Opacity <= 0.0 || material.AlbedoColor.W <= 0.0)
+				continue;
+
 			BatchKey key = new(mesh.Id, material.Id);
-
-			if (!_drawBatches.TryGetValue(key, out DrawBatch? batch))
-			{
-				batch = new DrawBatch(mesh, material);
-				_drawBatches.Add(key, batch);
-			}
-
 			Transform transform = entity.Get<Transform>();
 			InstanceData instance = CreateInstanceData(transform);
 
-			// CPU frustum culling: don't put instances outside the camera
-			// frustum into the batch, so they generate no GPU work this frame.
 			MeshBounds bounds = GetOrCreateMeshBounds(mesh);
 			Vector3 worldCenter = Vector3.Transform(
 				bounds.Center,
@@ -664,13 +764,51 @@ public sealed unsafe class RenderBackend : IDisposable
 				continue;
 			}
 
-			batch.AddInstance(instance);
+			if (IsTransparent(material))
+			{
+				float distanceSquared = Vector3.DistanceSquared(
+					worldCenter,
+					cameraPosition);
+
+				if (!_transparentBatches.TryGetValue(
+					key,
+					out TransparentBatch? transparentBatch))
+				{
+					transparentBatch = new TransparentBatch(mesh, material);
+					_transparentBatches.Add(key, transparentBatch);
+				}
+
+				transparentBatch.AddInstance(instance, distanceSquared);
+			}
+			else
+			{
+				if (!_drawBatches.TryGetValue(key, out DrawBatch? batch))
+				{
+					batch = new DrawBatch(mesh, material);
+					_drawBatches.Add(key, batch);
+				}
+
+				batch.AddInstance(instance);
+			}
 		}
 
 		int totalInstanceCount = 0;
 
 		foreach (DrawBatch batch in _drawBatches.Values)
 			totalInstanceCount = checked(totalInstanceCount + batch.InstanceCount);
+
+		foreach (TransparentBatch batch in _transparentBatches.Values)
+		{
+			if (batch.InstanceCount == 0)
+				continue;
+
+			batch.SortInstances();
+			_sortedTransparentBatches.Add(batch);
+			totalInstanceCount = checked(totalInstanceCount + batch.InstanceCount);
+		}
+
+		_sortedTransparentBatches.Sort(static (left, right) =>
+			right.SortDistanceSquared.CompareTo(left.SortDistanceSquared));
 
 		if (totalInstanceCount > 0)
 		{
@@ -683,6 +821,13 @@ public sealed unsafe class RenderBackend : IDisposable
 				if (batch.InstanceCount == 0)
 					continue;
 
+				batch.InstanceStart = instanceOffset;
+				batch.CopyInstancesTo(_instanceUploadData, instanceOffset);
+				instanceOffset += batch.InstanceCount;
+			}
+
+			foreach (TransparentBatch batch in _sortedTransparentBatches)
+			{
 				batch.InstanceStart = instanceOffset;
 				batch.CopyInstancesTo(_instanceUploadData, instanceOffset);
 				instanceOffset += batch.InstanceCount;
@@ -707,6 +852,10 @@ public sealed unsafe class RenderBackend : IDisposable
 			0,
 			new SkyBuffer(inverseViewProjection));
 
+		int skyDrawCalls = 0;
+		int opaqueDrawCalls = 0;
+		int transparentDrawCalls = 0;
+
 		_commandList.Begin();
 
 		_commandList.SetFramebuffer(
@@ -719,6 +868,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		_commandList.SetPipeline(_skyPipeline);
 		_commandList.SetGraphicsResourceSet(0, _skyResourceSet);
 		_commandList.Draw(3);
+		skyDrawCalls++;
 
 		_commandList.SetPipeline(_pipeline);
 		_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
@@ -743,7 +893,7 @@ public sealed unsafe class RenderBackend : IDisposable
 			_graphicsDevice.UpdateBuffer(
 				materialResources.Buffer,
 				0,
-				new MaterialBuffer(albedoColor));
+				new MaterialBuffer(albedoColor, (float)material.Opacity));
 
 			MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
 
@@ -787,12 +937,175 @@ public sealed unsafe class RenderBackend : IDisposable
 				0,
 				0,
 				0);
+			opaqueDrawCalls++;
+		}
+
+		if (_sortedTransparentBatches.Count > 0)
+		{
+			_commandList.SetPipeline(_transparentPipeline);
+			_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
+
+			foreach (TransparentBatch batch in _sortedTransparentBatches)
+			{
+				Material material = batch.Material;
+				MaterialResources materialResources =
+					GetOrCreateMaterialResources(material);
+
+				Vector4 albedoColor = new(
+					(float)material.AlbedoColor.X,
+					(float)material.AlbedoColor.Y,
+					(float)material.AlbedoColor.Z,
+					(float)material.AlbedoColor.W);
+
+				_graphicsDevice.UpdateBuffer(
+					materialResources.Buffer,
+					0,
+					new MaterialBuffer(albedoColor, (float)material.Opacity));
+
+				MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
+
+				_commandList.SetGraphicsResourceSet(
+					1,
+					materialResources.ResourceSet);
+
+				_commandList.SetVertexBuffer(0, meshBuffer.PositionBuffer);
+
+				if (meshBuffer.NormalBuffer != null)
+					_commandList.SetVertexBuffer(1, meshBuffer.NormalBuffer);
+
+				if (meshBuffer.UVBuffer != null)
+					_commandList.SetVertexBuffer(2, meshBuffer.UVBuffer);
+
+				uint instanceBufferOffset = checked(
+					(uint)(batch.InstanceStart * InstanceDataSize));
+
+				_commandList.SetVertexBuffer(
+					3,
+					_instanceBuffer!,
+					instanceBufferOffset);
+
+				_commandList.SetIndexBuffer(
+					meshBuffer.IndexBuffer,
+					IndexFormat.UInt32);
+
+				_commandList.DrawIndexed(
+					meshBuffer.IndexCount,
+					(uint)batch.InstanceCount,
+					0,
+					0,
+					0);
+				transparentDrawCalls++;
+			}
 		}
 
 		_commandList.End();
 
 		_graphicsDevice.SubmitCommands(_commandList);
 		_graphicsDevice.SwapBuffers();
+
+		long currentTime = Environment.TickCount64;
+
+		if (currentTime - _lastDrawCallLogTime >= 1000)
+		{
+			_lastDrawCallLogTime = currentTime;
+
+			int totalDrawCalls =
+				skyDrawCalls +
+				opaqueDrawCalls +
+				transparentDrawCalls;
+
+			System.Console.WriteLine(
+				$"Draw calls: {totalDrawCalls} " +
+				$"(Sky: {skyDrawCalls}, Opaque: {opaqueDrawCalls}, " +
+				$"Transparent: {transparentDrawCalls}) | " +
+				$"Instances: {totalInstanceCount}");
+		}
+	}
+
+	private bool IsTransparent(Material material) =>
+		material.Opacity < 1.0 ||
+		material.AlbedoColor.W < 1.0 ||
+		material.UseAlphaBlending ||
+		TextureHasAlpha(material.Albedo);
+
+	private bool TextureHasAlpha(string? path)
+	{
+		if (string.IsNullOrWhiteSpace(path))
+			return false;
+
+		string fullPath = Path.GetFullPath(path);
+
+		if (_textureAlphaCache.TryGetValue(fullPath, out bool cached))
+			return cached;
+
+		bool hasAlpha = false;
+
+		try
+		{
+			using FileStream stream = File.OpenRead(fullPath);
+			byte[] signature = new byte[8];
+
+			if (stream.Read(signature, 0, signature.Length) == signature.Length &&
+				signature.AsSpan().SequenceEqual(new byte[]
+				{ 137, 80, 78, 71, 13, 10, 26, 10 }))
+			{
+				byte[] lengthBytes = new byte[4];
+				byte[] typeBytes = new byte[4];
+
+				while (stream.Position + 8 <= stream.Length)
+				{
+					if (stream.Read(lengthBytes, 0, 4) != 4 ||
+						stream.Read(typeBytes, 0, 4) != 4)
+						break;
+
+					uint chunkLength = BinaryPrimitives.ReadUInt32BigEndian(lengthBytes);
+					string chunkType = System.Text.Encoding.ASCII.GetString(typeBytes);
+
+					if (chunkLength > stream.Length - stream.Position - 4)
+						break;
+
+					if (chunkType == "IHDR")
+					{
+						if (chunkLength != 13)
+							break;
+
+						byte[] header = new byte[13];
+
+						if (stream.Read(header, 0, header.Length) != header.Length)
+							break;
+
+						hasAlpha = header[9] is 4 or 6;
+						stream.Seek(4, SeekOrigin.Current);
+
+						if (hasAlpha)
+							break;
+					}
+					else if (chunkType == "tRNS")
+					{
+						hasAlpha = true;
+						break;
+					}
+					else
+					{
+						stream.Seek(chunkLength + 4L, SeekOrigin.Current);
+					}
+
+					if (chunkType == "IEND")
+						break;
+				}
+			}
+		}
+		catch (IOException)
+		{
+			hasAlpha = false;
+		}
+		catch (UnauthorizedAccessException)
+		{
+			hasAlpha = false;
+		}
+
+		_textureAlphaCache[fullPath] = hasAlpha;
+		return hasAlpha;
 	}
 
 	private void EnsureInstanceUploadCapacity(int requiredCount)
@@ -824,9 +1137,6 @@ public sealed unsafe class RenderBackend : IDisposable
 			return;
 		}
 
-		// Allocate at least 4096 slots on first use so a terrain that is
-		// populated over several frames does not recreate the GPU buffer
-		// for every small increase in the instance count.
 		int capacity = _instanceBufferCapacity == 0
 			? 4096
 			: _instanceBufferCapacity;
@@ -970,48 +1280,42 @@ public sealed unsafe class RenderBackend : IDisposable
 	{
 		return
 		[
-            // Left
-            new FrustumPlane(
+			new FrustumPlane(
 				new Vector3(
 					matrix.M11 + matrix.M14,
 					matrix.M21 + matrix.M24,
 					matrix.M31 + matrix.M34),
 				matrix.M41 + matrix.M44),
 
-            // Right
-            new FrustumPlane(
+			new FrustumPlane(
 				new Vector3(
 					matrix.M14 - matrix.M11,
 					matrix.M24 - matrix.M21,
 					matrix.M34 - matrix.M31),
 				matrix.M44 - matrix.M41),
 
-            // Bottom
-            new FrustumPlane(
+			new FrustumPlane(
 				new Vector3(
 					matrix.M12 + matrix.M14,
 					matrix.M22 + matrix.M24,
 					matrix.M32 + matrix.M34),
 				matrix.M42 + matrix.M44),
 
-            // Top
-            new FrustumPlane(
+			new FrustumPlane(
 				new Vector3(
 					matrix.M14 - matrix.M12,
 					matrix.M24 - matrix.M22,
 					matrix.M34 - matrix.M32),
 				matrix.M44 - matrix.M42),
 
-            // Near — Vulkan clip-space depth range is 0..1.
-            new FrustumPlane(
+			new FrustumPlane(
 				new Vector3(
 					matrix.M13,
 					matrix.M23,
 					matrix.M33),
 				matrix.M43),
 
-            // Far
-            new FrustumPlane(
+			new FrustumPlane(
 				new Vector3(
 					matrix.M14 - matrix.M13,
 					matrix.M24 - matrix.M23,
@@ -1147,8 +1451,6 @@ public sealed unsafe class RenderBackend : IDisposable
 						  Matrix4x4.CreateFromQuaternion(quaternion) *
 						  Matrix4x4.CreateTranslation(position);
 
-		// Вычисляем normal matrix на CPU один раз на экземпляр,
-		// а не выполняем inverse() на GPU для каждой вершины.
 		Matrix4x4 normalMatrix = Matrix4x4.Identity;
 
 		if (Matrix4x4.Invert(model, out Matrix4x4 inverseModel))
@@ -1261,6 +1563,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		_commandList.Dispose();
 
 		_pipeline.Dispose();
+		_transparentPipeline.Dispose();
 		_skyPipeline.Dispose();
 
 		foreach (Shader shader in _shaders)
@@ -1278,6 +1581,7 @@ public sealed unsafe class RenderBackend : IDisposable
 			texture.Dispose();
 
 		_textureCache.Clear();
+		_textureAlphaCache.Clear();
 
 		foreach (MeshBuffer meshBuffer in _meshCache.Values)
 			meshBuffer.Dispose();
@@ -1285,6 +1589,8 @@ public sealed unsafe class RenderBackend : IDisposable
 		_meshCache.Clear();
 		_meshBoundsCache.Clear();
 		_drawBatches.Clear();
+		_transparentBatches.Clear();
+		_sortedTransparentBatches.Clear();
 
 		_instanceBuffer?.Dispose();
 		_instanceBuffer = null;
