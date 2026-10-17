@@ -649,7 +649,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		DisposeOcclusionTextures();
 		if (width <= 0 || height <= 0)
 			return;
-
+		
 		_occlusionTextureWidth = width;
 		_occlusionTextureHeight = height;
 		_occlusionDepthTexture = Factory.CreateTexture(
@@ -1499,10 +1499,10 @@ public sealed unsafe class RenderBackend : IDisposable
 	}
 
 	private bool IsTransparent(Material material) =>
-		material.Opacity < 1.0 ||
-		material.AlbedoColor.W < 1.0 ||
-		material.UseAlphaBlending ||
-		TextureHasAlpha(material.Albedo);
+	material.Opacity < 1.0 ||
+	material.AlbedoColor.W < 1.0 ||
+	material.UseAlphaBlending ||
+	TextureHasAlpha(material.Albedo);
 
 	private bool TextureHasAlpha(string? path)
 	{
@@ -1514,74 +1514,11 @@ public sealed unsafe class RenderBackend : IDisposable
 		if (_textureAlphaCache.TryGetValue(fullPath, out bool cached))
 			return cached;
 
-		bool hasAlpha = false;
+		_ = GetOrCreateTexture(fullPath);
 
-		try
-		{
-			using FileStream stream = File.OpenRead(fullPath);
-			byte[] signature = new byte[8];
-
-			if (stream.Read(signature, 0, signature.Length) == signature.Length &&
-				signature.AsSpan().SequenceEqual(new byte[]
-				{ 137, 80, 78, 71, 13, 10, 26, 10 }))
-			{
-				byte[] lengthBytes = new byte[4];
-				byte[] typeBytes = new byte[4];
-
-				while (stream.Position + 8 <= stream.Length)
-				{
-					if (stream.Read(lengthBytes, 0, 4) != 4 ||
-						stream.Read(typeBytes, 0, 4) != 4)
-						break;
-
-					uint chunkLength = BinaryPrimitives.ReadUInt32BigEndian(lengthBytes);
-					string chunkType = System.Text.Encoding.ASCII.GetString(typeBytes);
-
-					if (chunkLength > stream.Length - stream.Position - 4)
-						break;
-
-					if (chunkType == "IHDR")
-					{
-						if (chunkLength != 13)
-							break;
-
-						byte[] header = new byte[13];
-
-						if (stream.Read(header, 0, header.Length) != header.Length)
-							break;
-
-						hasAlpha = header[9] is 4 or 6;
-						stream.Seek(4, SeekOrigin.Current);
-
-						if (hasAlpha)
-							break;
-					}
-					else if (chunkType == "tRNS")
-					{
-						hasAlpha = true;
-						break;
-					}
-					else
-					{
-						stream.Seek(chunkLength + 4L, SeekOrigin.Current);
-					}
-
-					if (chunkType == "IEND")
-						break;
-				}
-			}
-		}
-		catch (IOException)
-		{
-			hasAlpha = false;
-		}
-		catch (UnauthorizedAccessException)
-		{
-			hasAlpha = false;
-		}
-
-		_textureAlphaCache[fullPath] = hasAlpha;
-		return hasAlpha;
+		return _textureAlphaCache.TryGetValue(
+			fullPath,
+			out cached) && cached;
 	}
 
 	private void EnsureInstanceUploadCapacity(int requiredCount)
@@ -1670,9 +1607,12 @@ public sealed unsafe class RenderBackend : IDisposable
 		Texture texture = TextureLoader.Load(
 			Factory,
 			_graphicsDevice,
-			fullPath);
+			fullPath,
+			out bool hasAlpha);
 
 		_textureCache.Add(fullPath, texture);
+		_textureAlphaCache[fullPath] = hasAlpha;
+
 		return texture;
 	}
 

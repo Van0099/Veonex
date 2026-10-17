@@ -1,4 +1,5 @@
-﻿using NeoVeldrid;
+﻿
+using NeoVeldrid;
 using StbImageSharp;
 
 namespace Veonex.Render;
@@ -10,15 +11,28 @@ public static class TextureLoader
 		GraphicsDevice graphicsDevice,
 		string path)
 	{
+		return Load(factory, graphicsDevice, path, out _);
+	}
+
+	public static Texture Load(
+		ResourceFactory factory,
+		GraphicsDevice graphicsDevice,
+		string path,
+		out bool hasAlpha)
+	{
 		if (string.IsNullOrWhiteSpace(path))
+		{
 			throw new ArgumentException(
 				"Texture path cannot be empty.",
 				nameof(path));
+		}
 
 		if (!File.Exists(path))
+		{
 			throw new FileNotFoundException(
 				"Texture file was not found.",
 				path);
+		}
 
 		if (!string.Equals(
 				Path.GetExtension(path),
@@ -39,6 +53,8 @@ public static class TextureLoader
 		}
 
 		byte[] pixels = image.Data;
+
+		hasAlpha = HasNonOpaquePixel(pixels);
 
 		Texture texture = factory.CreateTexture(
 			TextureDescription.Texture2D(
@@ -70,5 +86,16 @@ public static class TextureLoader
 			texture.Dispose();
 			throw;
 		}
+	}
+
+	private static bool HasNonOpaquePixel(byte[] pixels)
+	{
+		for (int i = 3; i < pixels.Length; i += 4)
+		{
+			if (pixels[i] < byte.MaxValue)
+				return true;
+		}
+
+		return false;
 	}
 }
