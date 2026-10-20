@@ -184,7 +184,7 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		public void AddInstance(
 			InstanceData instance,
-			Vector3 worldCenter,
+			Vector3 relativeCenter,
 			float worldRadius)
 		{
 			if (InstanceCount == _instances.Length)
@@ -197,7 +197,7 @@ public sealed unsafe class RenderBackend : IDisposable
 			_instances[InstanceCount] = instance;
 			_occlusionInstances[InstanceCount] = new OcclusionInstanceData
 			{
-				CenterRadius = new Vector4(worldCenter, worldRadius)
+				CenterRadius = new Vector4(relativeCenter, worldRadius)
 			};
 			InstanceCount++;
 		}
@@ -649,7 +649,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		DisposeOcclusionTextures();
 		if (width <= 0 || height <= 0)
 			return;
-		
+
 		_occlusionTextureWidth = width;
 		_occlusionTextureHeight = height;
 		_occlusionDepthTexture = Factory.CreateTexture(
@@ -1041,9 +1041,16 @@ public sealed unsafe class RenderBackend : IDisposable
 		if (_renderWidth <= 0 || _renderHeight <= 0)
 			return;
 
+		Transform cameraTransform = camera.Entity.Get<Transform>();
+		double cameraX = cameraTransform.Position.X;
+		double cameraY = cameraTransform.Position.Y;
+		double cameraZ = cameraTransform.Position.Z;
+
 		float aspect = (float)_renderWidth / _renderHeight;
 		camera.AspectRatio = aspect;
 
+		// Вся геометрия переводится в систему координат относительно камеры.
+		// Поэтому View содержит только поворот, а позиция камеры остаётся double на CPU.
 		Matrix4x4 view = CreateViewMatrix(camera);
 
 		Matrix4x4 projection = Matrix4x4.CreatePerspectiveFieldOfView(
@@ -1072,12 +1079,6 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_sortedTransparentBatches.Clear();
 
-		Transform cameraTransform = camera.Entity.Get<Transform>();
-		Vector3 cameraPosition = new(
-			(float)cameraTransform.Position.X,
-			(float)cameraTransform.Position.Y,
-			(float)cameraTransform.Position.Z);
-
 		foreach (Entity entity in scene.Entities)
 		{
 			if (!entity.Has<MeshRenderer>())
@@ -1103,10 +1104,14 @@ public sealed unsafe class RenderBackend : IDisposable
 
 			BatchKey key = new(mesh.Id, material.Id);
 			Transform transform = entity.Get<Transform>();
-			InstanceData instance = CreateInstanceData(transform);
+			InstanceData instance = CreateInstanceData(
+				transform,
+				cameraX,
+				cameraY,
+				cameraZ);
 
 			MeshBounds bounds = GetOrCreateMeshBounds(mesh);
-			Vector3 worldCenter = Vector3.Transform(
+			Vector3 relativeCenter = Vector3.Transform(
 				bounds.Center,
 				instance.Model);
 
@@ -1124,7 +1129,7 @@ public sealed unsafe class RenderBackend : IDisposable
 			float worldRadius = bounds.Radius * maxScale;
 
 			if (!IsSphereVisible(
-				worldCenter,
+				relativeCenter,
 				worldRadius,
 				frustumPlanes))
 			{
@@ -1133,9 +1138,8 @@ public sealed unsafe class RenderBackend : IDisposable
 
 			if (IsTransparent(material))
 			{
-				float distanceSquared = Vector3.DistanceSquared(
-					worldCenter,
-					cameraPosition);
+				// relativeCenter уже вычислен в системе координат относительно камеры.
+				float distanceSquared = relativeCenter.LengthSquared();
 
 				if (!_transparentBatches.TryGetValue(
 					key,
@@ -1155,7 +1159,7 @@ public sealed unsafe class RenderBackend : IDisposable
 					_drawBatches.Add(key, batch);
 				}
 
-				batch.AddInstance(instance, worldCenter, worldRadius);
+				batch.AddInstance(instance, relativeCenter, worldRadius);
 			}
 		}
 
@@ -1857,12 +1861,17 @@ public sealed unsafe class RenderBackend : IDisposable
 			uvBuffer);
 	}
 
-	private static InstanceData CreateInstanceData(Transform transform)
+	private static InstanceData CreateInstanceData(
+		Transform transform,
+		double cameraX,
+		double cameraY,
+		double cameraZ)
 	{
+		// Важно: сначала вычитаем абсолютные позиции в double и только потом приводим к float.
 		Vector3 position = new(
-			(float)transform.Position.X,
-			(float)transform.Position.Y,
-			(float)transform.Position.Z);
+			(float)(transform.Position.X - cameraX),
+			(float)(transform.Position.Y - cameraY),
+			(float)(transform.Position.Z - cameraZ));
 
 		Vector3 scale = new(
 			(float)transform.Scale.X,
@@ -1916,12 +1925,6 @@ public sealed unsafe class RenderBackend : IDisposable
 	private static Matrix4x4 CreateViewMatrix(Camera camera)
 	{
 		Transform transform = camera.Entity.Get<Transform>();
-
-		Vector3 position = new(
-			(float)transform.Position.X,
-			(float)transform.Position.Y,
-			(float)transform.Position.Z);
-
 		DQuaternion rotation = transform.Quaternion;
 
 		DVector3 forwardD =
@@ -1940,9 +1943,10 @@ public sealed unsafe class RenderBackend : IDisposable
 			(float)upD.Y,
 			(float)upD.Z);
 
+		// Камера находится в начале относительной системы координат.
 		return Matrix4x4.CreateLookAt(
-			position,
-			position + forward,
+			Vector3.Zero,
+			forward,
 			up);
 	}
 
