@@ -1,4 +1,5 @@
 <Solution>
+  <Project Path="Veonex.Assets/Veonex.Assets.csproj" Id="88ba66bf-c7f4-4afa-b4f1-5e05fa9a507e" />
   <Project Path="Veonex.Core/Veonex.Core.csproj" />
   <Project Path="Veonex.Game/Veonex.Game.csproj" Id="c0120880-2abb-461a-b81f-2db50c8b7eb7" />
   <Project Path="Veonex.Input/Veonex.Input.csproj" Id="a06bb076-3510-4b8c-b16e-de5dfeea5d75" />

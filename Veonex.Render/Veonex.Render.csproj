@@ -15,6 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Veonex.Assets\Veonex.Assets.csproj" />
     <ProjectReference Include="..\Veonex.Core\Veonex.Core.csproj" />
   </ItemGroup>
 

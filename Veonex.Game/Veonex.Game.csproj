@@ -20,4 +20,10 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <None Update="model.glb">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>

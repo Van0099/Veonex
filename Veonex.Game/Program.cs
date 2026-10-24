@@ -1,11 +1,10 @@
-﻿
-using SDL;
+﻿using SDL;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
+using Veonex.Assets;
 using Veonex.Core;
 using Veonex.Game;
 using Veonex.Input;
@@ -31,9 +30,6 @@ const double maxDeltaTime = 0.05;
 const double fpsUpdateInterval = 1.0;
 const double lowFpsUpdateInterval = 5.0;
 
-const double frameTime60Fps = 1000.0 / 60.0;
-const double frameTime30Fps = 1000.0 / 30.0;
-
 WindowParameters parameters = new()
 {
 	Width = 1920,
@@ -45,17 +41,12 @@ WindowParameters parameters = new()
 };
 
 // ============================================================
-// Statistics state
-// Declared outside try so finally can save it.
+// Runtime FPS measurements
 // ============================================================
 
 Stopwatch stopwatch = new();
 
-bool statsStarted = false;
-
 long totalFrames = 0;
-long framesOver60Fps = 0;
-long framesOver30Fps = 0;
 
 int generatedBlocks = 0;
 int loadedTextureCount = 0;
@@ -72,7 +63,6 @@ double lowFpsUpdateTimer = 0.0;
 
 long framesSinceUpdate = 0;
 
-List<double> sessionFrameTimes = new(4096);
 List<double> recentFrameTimes = new(4096);
 
 // ============================================================
@@ -256,11 +246,103 @@ try
 		$"Total blocks: {generatedBlocks}");
 
 	// ========================================================
+	// Load and center model.* (Assimp-supported format)
+	// ========================================================
+
+	string[] supportedModelExtensions =
+	{
+		".obj", ".fbx", ".gltf", ".glb", ".dae", ".3ds",
+		".ply", ".stl", ".blend", ".x", ".ase", ".ifc"
+	};
+
+	string? modelPath = Directory
+		.GetFiles(Directory.GetCurrentDirectory(), "model.*")
+		.FirstOrDefault(path => supportedModelExtensions.Contains(
+			Path.GetExtension(path), StringComparer.OrdinalIgnoreCase));
+
+	if (modelPath is null)
+	{
+		throw new FileNotFoundException(
+			"Model file not found. Put a supported model named model.<format> " +
+			"in the working directory (for example, model.obj or model.glb).");
+	}
+
+	IReadOnlyList<Mesh> modelMeshes = ModelLoader.Load(modelPath);
+
+	if (modelMeshes.Count == 0 ||
+		modelMeshes.All(mesh => mesh.Data.Positions.Length == 0))
+	{
+		throw new InvalidOperationException(
+			$"Model contains no vertices: {modelPath}");
+	}
+
+	double minX = double.PositiveInfinity;
+	double minY = double.PositiveInfinity;
+	double minZ = double.PositiveInfinity;
+	double maxX = double.NegativeInfinity;
+	double maxY = double.NegativeInfinity;
+	double maxZ = double.NegativeInfinity;
+
+	foreach (Mesh mesh in modelMeshes)
+	{
+		foreach (DVector3 vertex in mesh.Data.Positions)
+		{
+			minX = Math.Min(minX, vertex.X);
+			minY = Math.Min(minY, vertex.Y);
+			minZ = Math.Min(minZ, vertex.Z);
+			maxX = Math.Max(maxX, vertex.X);
+			maxY = Math.Max(maxY, vertex.Y);
+			maxZ = Math.Max(maxZ, vertex.Z);
+		}
+	}
+
+	double sizeX = maxX - minX;
+	double sizeY = maxY - minY;
+	double sizeZ = maxZ - minZ;
+	double largestDimension = Math.Max(sizeX, Math.Max(sizeY, sizeZ));
+
+	if (largestDimension <= 0.0)
+	{
+		throw new InvalidOperationException(
+			$"Model has invalid dimensions: {modelPath}");
+	}
+
+	// Keep the model's proportions and fit it inside a 4x4x4 box.
+	double modelScale = 4.0 / largestDimension;
+	double centerX = (minX + maxX) * 0.5;
+	double centerY = (minY + maxY) * 0.5;
+	double centerZ = (minZ + maxZ) * 0.5;
+
+	int centerColumnHeight = 1 + (int)Math.Round(
+		heightMap[terrainWidth / 2, terrainDepth / 2] * (maxHeight - 1));
+	centerColumnHeight = Math.Clamp(centerColumnHeight, 1, maxHeight);
+	double modelCenterY = centerColumnHeight * blockSize + 2.0;
+
+	for (int i = 0; i < modelMeshes.Count; i++)
+	{
+		Entity modelEntity = scene.Add($"Model_{i}");
+		Transform modelTransform = modelEntity.Add<Transform>();
+		modelTransform.Scale = new DVector3(modelScale, modelScale, modelScale);
+		modelTransform.Position = new DVector3(
+			-centerX * modelScale,
+			modelCenterY - centerY * modelScale,
+			-centerZ * modelScale);
+
+		MeshRenderer modelRenderer = modelEntity.Add<MeshRenderer>();
+		modelRenderer.Mesh = modelMeshes[i];
+		modelRenderer.Material = materials[0];
+	}
+
+	Console.WriteLine(
+		$"Loaded model: {Path.GetFileName(modelPath)} | " +
+		$"Meshes: {modelMeshes.Count} | " +
+		$"Size: {sizeX * modelScale:F2} x {sizeY * modelScale:F2} x {sizeZ * modelScale:F2}");
+
+	// ========================================================
 	// Start measurements
 	// ========================================================
 
 	stopwatch.Start();
-	statsStarted = true;
 
 	double previousTime =
 		stopwatch.Elapsed.TotalSeconds;
@@ -295,7 +377,6 @@ try
 		{
 			frameTimeMs = realDeltaTime * 1000.0;
 
-			sessionFrameTimes.Add(frameTimeMs);
 			recentFrameTimes.Add(frameTimeMs);
 
 			totalFrames++;
@@ -305,12 +386,6 @@ try
 
 			fpsUpdateTimer += realDeltaTime;
 			lowFpsUpdateTimer += realDeltaTime;
-
-			if (frameTimeMs > frameTime60Fps)
-				framesOver60Fps++;
-
-			if (frameTimeMs > frameTime30Fps)
-				framesOver30Fps++;
 
 			// Average session FPS based on measured frame time.
 			double measuredSeconds =
@@ -433,211 +508,14 @@ try
 }
 finally
 {
-	// ========================================================
-	// Save statistics on exit
-	// ========================================================
-
 	if (stopwatch.IsRunning)
 		stopwatch.Stop();
-
-	if (statsStarted)
-	{
-		try
-		{
-			double sessionDuration =
-				stopwatch.Elapsed.TotalSeconds;
-
-			double averageFrameTime =
-				totalFrames > 0
-					? totalFrameTimeMs / totalFrames
-					: 0.0;
-
-			double sessionAverageFps =
-				totalFrameTimeMs > 0.0
-					? totalFrames / (totalFrameTimeMs / 1000.0)
-					: 0.0;
-
-			double[] sortedFrameTimes =
-				sessionFrameTimes.ToArray();
-
-			Array.Sort(sortedFrameTimes);
-
-			double minFrameTime =
-				sortedFrameTimes.Length > 0
-					? sortedFrameTimes[0]
-					: 0.0;
-
-			double maxFrameTime =
-				sortedFrameTimes.Length > 0
-					? sortedFrameTimes[^1]
-					: 0.0;
-
-			double medianFrameTime =
-				GetPercentile(sortedFrameTimes, 0.50);
-
-			double p95FrameTime =
-				GetPercentile(sortedFrameTimes, 0.95);
-
-			double p99FrameTime =
-				GetPercentile(sortedFrameTimes, 0.99);
-
-			double sessionLow1Fps =
-				CalculateLowFpsFromSorted(
-					sortedFrameTimes,
-					0.01);
-
-			double sessionLow01Fps =
-				CalculateLowFpsFromSorted(
-					sortedFrameTimes,
-					0.001);
-
-			double over60Percent = totalFrames > 0
-				? framesOver60Fps * 100.0 / totalFrames
-				: 0.0;
-
-			double over30Percent = totalFrames > 0
-				? framesOver30Fps * 100.0 / totalFrames
-				: 0.0;
-
-			string statsPath =
-				Path.GetFullPath("stats.txt");
-
-			using (StreamWriter writer = new(
-				statsPath,
-				false,
-				new UTF8Encoding(false)))
-			{
-				writer.WriteLine("========================================");
-				writer.WriteLine("          VEONEX SESSION STATS");
-				writer.WriteLine("========================================");
-				writer.WriteLine();
-
-				writer.WriteLine(
-					$"Report generated: {DateTimeOffset.Now:O}");
-
-				writer.WriteLine(
-					$"Session duration: {FormatDuration(sessionDuration)}");
-
-				writer.WriteLine(
-					$"Session duration (seconds): {sessionDuration:F3}");
-
-				writer.WriteLine(
-					$"Working directory: {Environment.CurrentDirectory}");
-
-				writer.WriteLine();
-
-				writer.WriteLine("----- ENVIRONMENT -----");
-				writer.WriteLine($"OS: {Environment.OSVersion}");
-				writer.WriteLine($".NET: {Environment.Version}");
-				writer.WriteLine(
-					$"Process architecture: {(Environment.Is64BitProcess ? "64-bit" : "32-bit")}");
-
-				writer.WriteLine(
-					$"Processor count: {Environment.ProcessorCount}");
-
-				writer.WriteLine();
-
-				writer.WriteLine("----- WINDOW -----");
-				writer.WriteLine(
-					$"Configured resolution: {parameters.Width}x{parameters.Height}");
-
-				writer.WriteLine($"Title: {parameters.Title}");
-				writer.WriteLine($"Fullscreen: {parameters.Fullscreen}");
-				writer.WriteLine($"VSync: {parameters.VSync}");
-				writer.WriteLine($"Resizable: {parameters.Resizable}");
-
-				writer.WriteLine();
-
-				writer.WriteLine("----- TERRAIN -----");
-				writer.WriteLine(
-					$"Dimensions: {terrainWidth}x{terrainDepth}");
-
-				writer.WriteLine($"Maximum column height: {maxHeight}");
-				writer.WriteLine($"Block size: {blockSize:F2}");
-				writer.WriteLine($"Noise scale: {noiseScale:F4}");
-				writer.WriteLine($"Terrain seed: {terrainSeed}");
-				writer.WriteLine($"Texture seed: {textureSeed}");
-				writer.WriteLine($"Texture paths found: {loadedTextureCount}");
-				writer.WriteLine($"Generated blocks: {generatedBlocks}");
-
-				writer.WriteLine();
-
-				writer.WriteLine("----- FPS -----");
-				writer.WriteLine($"Measured frames: {totalFrames}");
-				writer.WriteLine($"Last reported FPS: {currentFps:F2}");
-				writer.WriteLine(
-					$"Average FPS (entire session): {sessionAverageFps:F2}");
-
-				writer.WriteLine(
-					$"1% Low FPS (entire session): {sessionLow1Fps:F2}");
-
-				writer.WriteLine(
-					$"0.1% Low FPS (entire session): {sessionLow01Fps:F2}");
-
-				writer.WriteLine();
-
-				writer.WriteLine("----- FRAME TIME -----");
-				writer.WriteLine(
-					$"Average frame time: {averageFrameTime:F3} ms");
-
-				writer.WriteLine($"Minimum frame time: {minFrameTime:F3} ms");
-				writer.WriteLine($"Maximum frame time: {maxFrameTime:F3} ms");
-				writer.WriteLine($"Median frame time (P50): {medianFrameTime:F3} ms");
-				writer.WriteLine($"P95 frame time: {p95FrameTime:F3} ms");
-				writer.WriteLine($"P99 frame time: {p99FrameTime:F3} ms");
-
-				writer.WriteLine();
-
-				writer.WriteLine("----- SLOW FRAMES -----");
-
-				writer.WriteLine(
-					$"Frames slower than 16.67 ms (~below 60 FPS): {framesOver60Fps}");
-
-				writer.WriteLine(
-					$"Percentage slower than 16.67 ms: {over60Percent:F2}%");
-
-				writer.WriteLine(
-					$"Frames slower than 33.33 ms (~below 30 FPS): {framesOver30Fps}");
-
-				writer.WriteLine(
-					$"Percentage slower than 33.33 ms: {over30Percent:F2}%");
-
-				writer.WriteLine();
-
-				writer.WriteLine("----- NOTES -----");
-				writer.WriteLine(
-					"FPS is calculated from measured time between loop iterations.");
-
-				writer.WriteLine(
-					"Simulation delta time is clamped to 50 ms, but statistics use unclamped time.");
-
-				writer.WriteLine(
-					"1% Low and 0.1% Low are calculated as the reciprocal of the average frame time among the slowest 1% and 0.1% of measured frames.");
-
-				writer.WriteLine(
-					"Frame times are collected throughout the session; the final low-FPS values use the complete sample.");
-
-				writer.WriteLine();
-				writer.WriteLine("========================================");
-				writer.WriteLine("                 END");
-				writer.WriteLine("========================================");
-			}
-
-			Console.WriteLine();
-			Console.WriteLine($"Statistics saved to: {statsPath}");
-		}
-		catch (Exception exception)
-		{
-			Console.Error.WriteLine(
-				$"Failed to save stats.txt: {exception}");
-		}
-	}
 
 	SDL3.SDL_Quit();
 }
 
 // ============================================================
-// Statistics helpers
+// Runtime FPS helper
 // ============================================================
 
 static double CalculateLowFpsFromSorted(
@@ -674,34 +552,4 @@ static double CalculateLowFpsFromSorted(
 	return averageSlowFrameTime > 0.0
 		? 1000.0 / averageSlowFrameTime
 		: 0.0;
-}
-
-static double GetPercentile(
-	double[] sortedValues,
-	double percentile)
-{
-	if (sortedValues.Length == 0)
-		return 0.0;
-
-	percentile = Math.Clamp(percentile, 0.0, 1.0);
-
-	int index = (int)Math.Ceiling(
-		percentile * sortedValues.Length) - 1;
-
-	index = Math.Clamp(
-		index,
-		0,
-		sortedValues.Length - 1);
-
-	return sortedValues[index];
-}
-
-static string FormatDuration(double seconds)
-{
-	TimeSpan duration = TimeSpan.FromSeconds(
-		Math.Max(0.0, seconds));
-
-	return $"{(int)duration.TotalHours:D2}:" +
-		   $"{duration.Minutes:D2}:" +
-		   $"{duration.Seconds:D2}";
 }

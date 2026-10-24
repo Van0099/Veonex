@@ -1,101 +1,64 @@
-﻿
-using NeoVeldrid;
-using StbImageSharp;
+﻿using NeoVeldrid;
+using Veonex.Assets;
 
 namespace Veonex.Render;
 
 public static class TextureLoader
 {
-	public static Texture Load(
-		ResourceFactory factory,
-		GraphicsDevice graphicsDevice,
-		string path)
-	{
-		return Load(factory, graphicsDevice, path, out _);
-	}
+    public static Texture Load(
+        ResourceFactory factory,
+        GraphicsDevice graphicsDevice,
+        string path)
+    {
+        return Load(
+            factory,
+            graphicsDevice,
+            path,
+            out _);
+    }
 
-	public static Texture Load(
-		ResourceFactory factory,
-		GraphicsDevice graphicsDevice,
-		string path,
-		out bool hasAlpha)
-	{
-		if (string.IsNullOrWhiteSpace(path))
-		{
-			throw new ArgumentException(
-				"Texture path cannot be empty.",
-				nameof(path));
-		}
+    public static Texture Load(
+        ResourceFactory factory,
+        GraphicsDevice graphicsDevice,
+        string path,
+        out bool hasAlpha)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        ArgumentNullException.ThrowIfNull(graphicsDevice);
 
-		if (!File.Exists(path))
-		{
-			throw new FileNotFoundException(
-				"Texture file was not found.",
-				path);
-		}
+        DecodedImage image = ImageDecoder.Load(path);
 
-		if (!string.Equals(
-				Path.GetExtension(path),
-				".png",
-				StringComparison.OrdinalIgnoreCase))
-		{
-			throw new NotSupportedException(
-				"Only PNG textures are supported.");
-		}
+        hasAlpha = image.HasAlpha;
 
-		ImageResult image;
+        Texture texture = factory.CreateTexture(
+            TextureDescription.Texture2D(
+                (uint)image.Width,
+                (uint)image.Height,
+                1,
+                1,
+                PixelFormat.R8_G8_B8_A8_UNorm,
+                TextureUsage.Sampled));
 
-		using (FileStream stream = File.OpenRead(path))
-		{
-			image = ImageResult.FromStream(
-				stream,
-				ColorComponents.RedGreenBlueAlpha);
-		}
+        try
+        {
+            graphicsDevice.UpdateTexture(
+                texture,
+                image.Pixels,
+                0,
+                0,
+                0,
+                (uint)image.Width,
+                (uint)image.Height,
+                1,
+                0,
+                0);
 
-		byte[] pixels = image.Data;
-
-		hasAlpha = HasNonOpaquePixel(pixels);
-
-		Texture texture = factory.CreateTexture(
-			TextureDescription.Texture2D(
-				(uint)image.Width,
-				(uint)image.Height,
-				1,
-				1,
-				PixelFormat.R8_G8_B8_A8_UNorm,
-				TextureUsage.Sampled));
-
-		try
-		{
-			graphicsDevice.UpdateTexture(
-				texture,
-				pixels,
-				0,
-				0,
-				0,
-				(uint)image.Width,
-				(uint)image.Height,
-				1,
-				0,
-				0);
-
-			return texture;
-		}
-		catch
-		{
-			texture.Dispose();
-			throw;
-		}
-	}
-
-	private static bool HasNonOpaquePixel(byte[] pixels)
-	{
-		for (int i = 3; i < pixels.Length; i += 4)
-		{
-			if (pixels[i] < byte.MaxValue)
-				return true;
-		}
-
-		return false;
-	}
+            return texture;
+        }
+        catch
+        {
+            texture.Dispose();
+            throw;
+        }
+    }
 }
