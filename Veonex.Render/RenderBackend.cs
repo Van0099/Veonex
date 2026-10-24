@@ -347,12 +347,23 @@ public sealed unsafe class RenderBackend : IDisposable
 	private struct MaterialBuffer
 	{
 		public Vector4 AlbedoColor;
+		public Vector4 EmissionColor;
 		public Vector4 Parameters;
 
-		public MaterialBuffer(Vector4 albedoColor, float opacity)
+		public MaterialBuffer(
+			Vector4 albedoColor,
+			float opacity,
+			Vector4 emissionColor,
+			float emissionStrength)
 		{
 			AlbedoColor = albedoColor;
-			Parameters = new Vector4(opacity, 0f, 0f, 0f);
+			EmissionColor = emissionColor;
+
+			Parameters = new Vector4(
+				opacity,
+				emissionStrength,
+				0f,
+				0f);
 		}
 	}
 
@@ -1356,10 +1367,20 @@ public sealed unsafe class RenderBackend : IDisposable
 				(float)material.AlbedoColor.Z,
 				(float)material.AlbedoColor.W);
 
+			Vector4 emissionColor = new(
+				(float)material.EmissionColor.X,
+				(float)material.EmissionColor.Y,
+				(float)material.EmissionColor.Z,
+				(float)material.EmissionColor.W);
+
 			_graphicsDevice.UpdateBuffer(
 				materialResources.Buffer,
 				0,
-				new MaterialBuffer(albedoColor, (float)material.Opacity));
+				new MaterialBuffer(
+					albedoColor,
+					(float)material.Opacity,
+					emissionColor,
+					(float)material.EmissionStrength));
 
 			MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
 
@@ -1436,10 +1457,20 @@ public sealed unsafe class RenderBackend : IDisposable
 					(float)material.AlbedoColor.Z,
 					(float)material.AlbedoColor.W);
 
+				Vector4 emissionColor = new(
+					(float)material.EmissionColor.X,
+					(float)material.EmissionColor.Y,
+					(float)material.EmissionColor.Z,
+					(float)material.EmissionColor.W);
+
 				_graphicsDevice.UpdateBuffer(
 					materialResources.Buffer,
 					0,
-					new MaterialBuffer(albedoColor, (float)material.Opacity));
+					new MaterialBuffer(
+						albedoColor,
+						(float)material.Opacity,
+						emissionColor,
+						(float)material.EmissionStrength));
 
 				MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
 

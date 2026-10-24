@@ -11,6 +11,19 @@ public sealed class Material
 	public string? Albedo { get; set; }
 	public DVector4 AlbedoColor { get; set; }
 
+	public DVector4 EmissionColor { get; set; } =
+		new(1.0, 1.0, 1.0, 1.0);
+
+	private double _emissionStrength = 0.0;
+
+	public double EmissionStrength
+	{
+		get => _emissionStrength;
+		set => _emissionStrength = double.IsFinite(value)
+			? Math.Max(0.0, value)
+			: 0.0;
+	}
+
 	public double Opacity
 	{
 		get => _opacity;
