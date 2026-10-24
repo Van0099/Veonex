@@ -133,10 +133,6 @@ try
 		new DVector4(0.48, 0.77, 0.23, 1.0),
 		grassTexturePath);
 
-	grassMaterial.EmissionColor =
-		new DVector4(0.48, 0.77, 0.23, 1.0);
-	grassMaterial.EmissionStrength = 1.0;
-
 
 	Console.WriteLine($"Loaded terrain texture: {grassTexturePath}");
 
