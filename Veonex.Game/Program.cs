@@ -15,15 +15,12 @@ using Veonex.Render;
 // Configuration
 // ============================================================
 
-const int terrainWidth = 24;
-const int terrainDepth = 24;
 const int maxHeight = 8;
 
 const double blockSize = 2.0;
 const double noiseScale = 0.08;
 
 const int terrainSeed = 67;
-const int textureSeed = 128;
 
 const double maxDeltaTime = 0.05;
 
@@ -47,9 +44,6 @@ WindowParameters parameters = new()
 Stopwatch stopwatch = new();
 
 long totalFrames = 0;
-
-int generatedBlocks = 0;
-int loadedTextureCount = 0;
 
 double totalFrameTimeMs = 0.0;
 double currentFps = 0.0;
@@ -120,130 +114,49 @@ try
 		mouseSensitivity: 0.15);
 
 	// ========================================================
-	// Textures
+	// Grass material
 	// ========================================================
 
-	string textureDirectory = "textures";
+	string grassTexturePath = Path.GetFullPath(
+		Path.Combine("textures", "grass.png"));
 
-	if (!Directory.Exists(textureDirectory))
+	if (!File.Exists(grassTexturePath))
 	{
-		throw new DirectoryNotFoundException(
-			$"Texture directory not found: {textureDirectory}");
+		throw new FileNotFoundException(
+			"Terrain texture was not found. Expected textures/grass.png.",
+			grassTexturePath);
 	}
 
-	string[] texturePaths = Directory
-		.GetFiles(textureDirectory)
-		.Where(path =>
-		{
-			string extension =
-				Path.GetExtension(path).ToLowerInvariant();
+	Material grassMaterial = new(
+		"Grass",
+		"Basic",
+		new DVector4(0.48, 0.77, 0.23, 1.0),
+		grassTexturePath);
 
-			return extension is
-				".png" or
-				".jpg" or
-				".jpeg" or
-				".bmp" or
-				".tga";
-		})
-		.OrderBy(path => path, StringComparer.Ordinal)
-		.ToArray();
 
-	if (texturePaths.Length == 0)
-	{
-		throw new InvalidOperationException(
-			$"No supported textures found in: {textureDirectory}");
-	}
+	Console.WriteLine($"Loaded terrain texture: {grassTexturePath}");
 
-	Random textureRandom = new(textureSeed);
+	// ========================================================
+	// Infinite chunk terrain
+	// ========================================================
 
-	Material[] materials = texturePaths
-		.Select(path => new Material(
-			Path.GetFileNameWithoutExtension(path),
-			"Basic",
-			new DVector4(1, 1, 1, 1),
-			path))
-		.ToArray();
+	using TerrainChunkManager terrainManager = new(
+		scene,
+		renderer,
+		grassMaterial,
+		chunkSize: 16,
+		maxHeight: maxHeight,
+		blockSize: blockSize,
+		noiseScale: noiseScale,
+		seed: terrainSeed,
+		loadRadius: 9,
+		buildsPerFrame: 1,
+		animationDuration: 0.45);
 
-	loadedTextureCount = materials.Length;
+	terrainManager.Initialize(cameraTransform.Position);
 
 	Console.WriteLine(
-		$"Loaded {loadedTextureCount} terrain texture paths.");
-
-	// ========================================================
-	// Cube mesh
-	// ========================================================
-
-	Mesh cubeMesh = CubeMeshTemplate.Create();
-
-	// ========================================================
-	// Generate terrain
-	// ========================================================
-
-	PerlinNoise.Initialize(terrainSeed);
-
-	double[,] heightMap = PerlinNoise.GenerateFbmMap2D(
-		terrainWidth,
-		terrainDepth,
-		scale: noiseScale,
-		offset: DVector2.Zero,
-		octaves: 4,
-		lacunarity: 2.0,
-		gain: 0.5);
-
-	for (int z = 0; z < terrainDepth; z++)
-	{
-		for (int x = 0; x < terrainWidth; x++)
-		{
-			double noise = heightMap[x, z];
-
-			int columnHeight = 1 + (int)Math.Round(
-				noise * (maxHeight - 1));
-
-			columnHeight = Math.Clamp(
-				columnHeight,
-				1,
-				maxHeight);
-
-			double worldX =
-				(x - (terrainWidth - 1) / 2.0) * blockSize;
-
-			double worldZ =
-				(z - (terrainDepth - 1) / 2.0) * blockSize;
-
-			// Fill each column from the bottom upwards.
-			for (int y = 0; y < columnHeight; y++)
-			{
-				Entity block = scene.Add(
-					$"Terrain_{x}_{y}_{z}");
-
-				Transform transform =
-					block.Add<Transform>();
-
-				transform.Position = new DVector3(
-					worldX,
-					y * blockSize,
-					worldZ);
-
-				MeshRenderer meshRenderer =
-					block.Add<MeshRenderer>();
-
-				meshRenderer.Mesh = cubeMesh;
-
-				Material material = materials[
-					textureRandom.Next(materials.Length)];
-
-				meshRenderer.Material = material;
-
-				generatedBlocks++;
-			}
-		}
-	}
-
-	Console.WriteLine(
-		$"Generated terrain: {terrainWidth}x{terrainDepth}");
-
-	Console.WriteLine(
-		$"Total blocks: {generatedBlocks}");
+		$"Initialized terrain chunks: {terrainManager.LoadedChunkCount}");
 
 	// ========================================================
 	// Load and center model.* (Assimp-supported format)
@@ -313,10 +226,8 @@ try
 	double centerY = (minY + maxY) * 0.5;
 	double centerZ = (minZ + maxZ) * 0.5;
 
-	int centerColumnHeight = 1 + (int)Math.Round(
-		heightMap[terrainWidth / 2, terrainDepth / 2] * (maxHeight - 1));
-	centerColumnHeight = Math.Clamp(centerColumnHeight, 1, maxHeight);
-	double modelCenterY = centerColumnHeight * blockSize + 2.0;
+	double modelCenterY =
+		terrainManager.GetSurfaceHeight(0.0, 0.0) + 2.0;
 
 	for (int i = 0; i < modelMeshes.Count; i++)
 	{
@@ -330,7 +241,7 @@ try
 
 		MeshRenderer modelRenderer = modelEntity.Add<MeshRenderer>();
 		modelRenderer.Mesh = modelMeshes[i];
-		modelRenderer.Material = materials[0];
+		modelRenderer.Material = grassMaterial;
 	}
 
 	Console.WriteLine(
@@ -498,6 +409,7 @@ try
 		// ----------------------------------------------------
 
 		cameraController.Update(deltaTime);
+		terrainManager.Update(cameraTransform.Position, deltaTime);
 
 		// ----------------------------------------------------
 		// Render
