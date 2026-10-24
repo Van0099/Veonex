@@ -1,6 +1,7 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Generic;
-using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Veonex.Core;
@@ -17,6 +18,8 @@ public sealed class TerrainChunkManager : IDisposable
 	private const double Persistence = 0.5;
 	private const double MinAnimatedScale = 0.015;
 	private const double AnimationDrop = 1.4;
+	private const double InvFF = 1.0 / 0x00FFFFFF;
+	private const double InvSubdivisions = 1.0 / SubdivisionsPerCell;
 
 	private readonly Scene _scene;
 	private readonly RenderBackend _renderer;
@@ -32,10 +35,23 @@ public sealed class TerrainChunkManager : IDisposable
 	private readonly int _maxUploadsPerFrame;
 	private readonly double _animationDuration;
 	private readonly double _chunkWorldSize;
+	private readonly double _halfChunkCells;
+	private readonly double _heightRange;
+	private readonly double _invTotalAmplitude;
+	private readonly double[] _octaveFrequencies;
+	private readonly double[] _octaveAmplitudes;
+	private readonly uint[] _octaveSeedHashes;
+	private readonly ChunkCoordinate[] _offsets;
+	private readonly HashSet<ChunkCoordinate> _desired;
 
 	private readonly Dictionary<ChunkCoordinate, Chunk> _chunks = [];
 	private readonly Dictionary<ChunkCoordinate, PendingBuild> _pendingBuilds = [];
 	private readonly HashSet<ChunkCoordinate> _failedChunks = [];
+
+	private readonly List<Chunk> _chunksToRemove = [];
+	private readonly List<ChunkCoordinate> _pendingRemoveList = [];
+	private readonly List<ChunkCoordinate> _failedRemoveList = [];
+	private readonly List<ChunkCoordinate> _missingList = [];
 
 	private bool _initialized;
 	private bool _disposed;
@@ -95,8 +111,8 @@ public sealed class TerrainChunkManager : IDisposable
 		int loadRadius = 3,
 		int buildsPerFrame = 4,
 		double animationDuration = 0.45,
-		int maxConcurrentBuilds = 2,
-		int maxUploadsPerFrame = 2)
+		int maxConcurrentBuilds = 8,
+		int maxUploadsPerFrame = 8)
 	{
 		ArgumentNullException.ThrowIfNull(scene);
 		ArgumentNullException.ThrowIfNull(renderer);
@@ -135,15 +151,51 @@ public sealed class TerrainChunkManager : IDisposable
 		_maxUploadsPerFrame = maxUploadsPerFrame;
 		_animationDuration = animationDuration;
 		_chunkWorldSize = _chunkSize * _blockSize;
+		_halfChunkCells = _chunkSize * 0.5;
+		_heightRange = _maxHeight - 1;
+
+		int side = loadRadius * 2 + 1;
+		int capacity = side * side;
+
+		_offsets = new ChunkCoordinate[capacity];
+		int offsetIndex = 0;
+		for (int z = -loadRadius; z <= loadRadius; z++)
+			for (int x = -loadRadius; x <= loadRadius; x++)
+				_offsets[offsetIndex++] = new ChunkCoordinate(x, z);
+
+		_desired = new HashSet<ChunkCoordinate>(capacity);
+		_chunksToRemove.Capacity = capacity;
+		_missingList.Capacity = capacity;
+		_pendingRemoveList.Capacity = capacity;
+		_failedRemoveList.Capacity = capacity;
+
+		_octaveFrequencies = new double[Octaves];
+		_octaveAmplitudes = new double[Octaves];
+		_octaveSeedHashes = new uint[Octaves];
+
+		double amplitude = 1.0;
+		double frequency = _noiseScale;
+		double totalAmplitude = 0.0;
+
+		for (int i = 0; i < Octaves; i++)
+		{
+			_octaveFrequencies[i] = frequency;
+			_octaveAmplitudes[i] = amplitude;
+			_octaveSeedHashes[i] = unchecked(
+				(uint)(_seed + i * 1013) * 2246822519u);
+			totalAmplitude += amplitude;
+			amplitude *= Persistence;
+			frequency *= Lacunarity;
+		}
+
+		_invTotalAmplitude = 1.0 / totalAmplitude;
 	}
 
 	public void Initialize(DVector3 cameraPosition)
 	{
 		ThrowIfDisposed();
-
 		if (_initialized)
 			return;
-
 		_initialized = true;
 	}
 
@@ -154,30 +206,44 @@ public sealed class TerrainChunkManager : IDisposable
 		if (!_initialized)
 			Initialize(cameraPosition);
 
-		deltaTime = Math.Clamp(deltaTime, 0.0, 0.1);
+		if (deltaTime < 0.0)
+			deltaTime = 0.0;
+		else if (deltaTime > 0.1)
+			deltaTime = 0.1;
 
 		ChunkCoordinate center = GetChunkCoordinate(cameraPosition);
-		HashSet<ChunkCoordinate> desired = BuildDesired(center);
+		BuildDesired(center);
 
-		foreach (Chunk chunk in _chunks.Values)
-			chunk.TargetVisible = desired.Contains(chunk.Coordinate);
+		CancelObsoleteBuilds();
+		ProcessCompletedBuilds();
+		ScheduleMissingChunks(center);
 
-		CancelObsoleteBuilds(desired);
-		ProcessCompletedBuilds(desired);
-		ScheduleMissingChunks(desired, center);
-
-		List<Chunk> chunksToRemove = [];
+		_chunksToRemove.Clear();
 
 		double progressStep = deltaTime / _animationDuration;
 
 		foreach (Chunk chunk in _chunks.Values)
 		{
-			if (chunk.TargetVisible)
-				chunk.Progress = Math.Min(1.0, chunk.Progress + progressStep);
-			else
-				chunk.Progress = Math.Max(0.0, chunk.Progress - progressStep);
+			bool visible = _desired.Contains(chunk.Coordinate);
+			chunk.TargetVisible = visible;
 
-			double t = chunk.Progress;
+			double progress;
+			if (visible)
+			{
+				progress = chunk.Progress + progressStep;
+				if (progress > 1.0)
+					progress = 1.0;
+			}
+			else
+			{
+				progress = chunk.Progress - progressStep;
+				if (progress < 0.0)
+					progress = 0.0;
+			}
+
+			chunk.Progress = progress;
+
+			double t = progress;
 			double eased = t * t * (3.0 - 2.0 * t);
 			double scale = MinAnimatedScale + (1.0 - MinAnimatedScale) * eased;
 
@@ -188,12 +254,13 @@ public sealed class TerrainChunkManager : IDisposable
 				-AnimationDrop * (1.0 - eased),
 				chunk.Coordinate.Z * _chunkWorldSize);
 
-			if (!chunk.TargetVisible && chunk.Progress <= 0.0)
-				chunksToRemove.Add(chunk);
+			if (!visible && progress <= 0.0)
+				_chunksToRemove.Add(chunk);
 		}
 
-		foreach (Chunk chunk in chunksToRemove)
+		for (int i = 0; i < _chunksToRemove.Count; i++)
 		{
+			Chunk chunk = _chunksToRemove[i];
 			_scene.Remove(chunk.Entity);
 			_chunks.Remove(chunk.Coordinate);
 		}
@@ -202,19 +269,16 @@ public sealed class TerrainChunkManager : IDisposable
 	public double GetSurfaceHeight(double worldX, double worldZ)
 	{
 		ThrowIfDisposed();
-
-		double cellX = worldX / _blockSize;
-		double cellZ = worldZ / _blockSize;
-
-		return GetTerrainHeight(cellX, cellZ) * _blockSize;
+		return GetTerrainHeight(worldX / _blockSize, worldZ / _blockSize) * _blockSize;
 	}
 
-	private void CancelObsoleteBuilds(HashSet<ChunkCoordinate> desired)
+	private void CancelObsoleteBuilds()
 	{
-		foreach (KeyValuePair<ChunkCoordinate, PendingBuild> pair
-			in _pendingBuilds.ToArray())
+		_pendingRemoveList.Clear();
+
+		foreach (KeyValuePair<ChunkCoordinate, PendingBuild> pair in _pendingBuilds)
 		{
-			if (desired.Contains(pair.Key))
+			if (_desired.Contains(pair.Key))
 				continue;
 
 			PendingBuild pending = pair.Value;
@@ -223,22 +287,34 @@ public sealed class TerrainChunkManager : IDisposable
 				pending.Cancellation.Cancel();
 
 			if (pending.Task.IsCompleted)
-				RemovePendingBuild(pair.Key, pending);
+				_pendingRemoveList.Add(pair.Key);
 		}
 
-		foreach (ChunkCoordinate coordinate in _failedChunks.ToArray())
+		for (int i = 0; i < _pendingRemoveList.Count; i++)
 		{
-			if (!desired.Contains(coordinate))
-				_failedChunks.Remove(coordinate);
+			ChunkCoordinate coord = _pendingRemoveList[i];
+			if (_pendingBuilds.TryGetValue(coord, out PendingBuild? pending))
+				RemovePendingBuild(coord, pending);
 		}
+
+		_failedRemoveList.Clear();
+
+		foreach (ChunkCoordinate coordinate in _failedChunks)
+		{
+			if (!_desired.Contains(coordinate))
+				_failedRemoveList.Add(coordinate);
+		}
+
+		for (int i = 0; i < _failedRemoveList.Count; i++)
+			_failedChunks.Remove(_failedRemoveList[i]);
 	}
 
-	private void ProcessCompletedBuilds(HashSet<ChunkCoordinate> desired)
+	private void ProcessCompletedBuilds()
 	{
 		int uploads = 0;
+		_pendingRemoveList.Clear();
 
-		foreach (KeyValuePair<ChunkCoordinate, PendingBuild> pair
-			in _pendingBuilds.ToArray())
+		foreach (KeyValuePair<ChunkCoordinate, PendingBuild> pair in _pendingBuilds)
 		{
 			ChunkCoordinate coordinate = pair.Key;
 			PendingBuild pending = pair.Value;
@@ -247,15 +323,15 @@ public sealed class TerrainChunkManager : IDisposable
 			if (!task.IsCompleted)
 				continue;
 
-			if (!desired.Contains(coordinate))
+			if (!_desired.Contains(coordinate))
 			{
-				RemovePendingBuild(coordinate, pending);
+				_pendingRemoveList.Add(coordinate);
 				continue;
 			}
 
 			if (task.IsCanceled)
 			{
-				RemovePendingBuild(coordinate, pending);
+				_pendingRemoveList.Add(coordinate);
 				continue;
 			}
 
@@ -264,7 +340,7 @@ public sealed class TerrainChunkManager : IDisposable
 				Exception exception = task.Exception?.GetBaseException()
 					?? new InvalidOperationException("Chunk generation failed.");
 
-				RemovePendingBuild(coordinate, pending);
+				_pendingRemoveList.Add(coordinate);
 				_failedChunks.Add(coordinate);
 				GenerationFailed?.Invoke(exception);
 				continue;
@@ -274,11 +350,10 @@ public sealed class TerrainChunkManager : IDisposable
 				continue;
 
 			MeshData data = task.GetAwaiter().GetResult();
-
-			RemovePendingBuild(coordinate, pending);
+			_pendingRemoveList.Add(coordinate);
 
 			if (_disposed ||
-				!desired.Contains(coordinate) ||
+				!_desired.Contains(coordinate) ||
 				_chunks.ContainsKey(coordinate))
 			{
 				continue;
@@ -287,32 +362,73 @@ public sealed class TerrainChunkManager : IDisposable
 			CreateChunk(coordinate, data);
 			uploads++;
 		}
+
+		for (int i = 0; i < _pendingRemoveList.Count; i++)
+		{
+			ChunkCoordinate coord = _pendingRemoveList[i];
+			if (_pendingBuilds.TryGetValue(coord, out PendingBuild? pending))
+				RemovePendingBuild(coord, pending);
+		}
 	}
 
-	private void ScheduleMissingChunks(
-		HashSet<ChunkCoordinate> desired,
-		ChunkCoordinate center)
+	private void ScheduleMissingChunks(ChunkCoordinate center)
 	{
 		int availableSlots = _maxConcurrentBuilds - _pendingBuilds.Count;
-
 		if (availableSlots <= 0)
 			return;
 
-		int countToSchedule = Math.Min(
-			availableSlots,
-			_buildsPerFrame);
+		int countToSchedule = availableSlots < _buildsPerFrame
+			? availableSlots
+			: _buildsPerFrame;
 
-		List<ChunkCoordinate> missing = desired
-			.Where(coordinate =>
-				!_chunks.ContainsKey(coordinate) &&
-				!_pendingBuilds.ContainsKey(coordinate) &&
-				!_failedChunks.Contains(coordinate))
-			.OrderBy(coordinate => DistanceSquared(coordinate, center))
-			.Take(countToSchedule)
-			.ToList();
+		_missingList.Clear();
 
-		foreach (ChunkCoordinate coordinate in missing)
-			StartBuild(coordinate);
+		for (int i = 0; i < _offsets.Length; i++)
+		{
+			ChunkCoordinate offset = _offsets[i];
+			ChunkCoordinate coordinate = new(
+				center.X + offset.X,
+				center.Z + offset.Z);
+
+			if (_chunks.ContainsKey(coordinate))
+				continue;
+			if (_pendingBuilds.ContainsKey(coordinate))
+				continue;
+			if (_failedChunks.Contains(coordinate))
+				continue;
+
+			_missingList.Add(coordinate);
+		}
+
+		int toStart = _missingList.Count < countToSchedule
+			? _missingList.Count
+			: countToSchedule;
+
+		for (int i = 0; i < toStart; i++)
+		{
+			int bestIndex = i;
+			long bestDistance = DistanceSquared(_missingList[i], center);
+
+			for (int j = i + 1; j < _missingList.Count; j++)
+			{
+				long distance = DistanceSquared(_missingList[j], center);
+				if (distance < bestDistance)
+				{
+					bestDistance = distance;
+					bestIndex = j;
+				}
+			}
+
+			if (bestIndex != i)
+			{
+				ChunkCoordinate tmp = _missingList[i];
+				_missingList[i] = _missingList[bestIndex];
+				_missingList[bestIndex] = tmp;
+			}
+		}
+
+		for (int i = 0; i < toStart; i++)
+			StartBuild(_missingList[i]);
 	}
 
 	private void StartBuild(ChunkCoordinate coordinate)
@@ -349,17 +465,17 @@ public sealed class TerrainChunkManager : IDisposable
 		pending.Cancellation.Dispose();
 	}
 
-	private HashSet<ChunkCoordinate> BuildDesired(ChunkCoordinate center)
+	private void BuildDesired(ChunkCoordinate center)
 	{
-		HashSet<ChunkCoordinate> desired = [];
+		_desired.Clear();
 
-		for (int z = -_loadRadius; z <= _loadRadius; z++)
+		for (int i = 0; i < _offsets.Length; i++)
 		{
-			for (int x = -_loadRadius; x <= _loadRadius; x++)
-				desired.Add(new ChunkCoordinate(center.X + x, center.Z + z));
+			ChunkCoordinate offset = _offsets[i];
+			_desired.Add(new ChunkCoordinate(
+				center.X + offset.X,
+				center.Z + offset.Z));
 		}
-
-		return desired;
 	}
 
 	private ChunkCoordinate GetChunkCoordinate(DVector3 worldPosition)
@@ -370,6 +486,7 @@ public sealed class TerrainChunkManager : IDisposable
 		return new ChunkCoordinate(x, z);
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static long DistanceSquared(ChunkCoordinate a, ChunkCoordinate b)
 	{
 		long dx = (long)a.X - b.X;
@@ -380,12 +497,11 @@ public sealed class TerrainChunkManager : IDisposable
 
 	private void CreateChunk(ChunkCoordinate coordinate, MeshData data)
 	{
-		Mesh mesh = new(
-			$"TerrainChunk_{coordinate.X}_{coordinate.Z}",
-			data);
+		string name = $"TerrainChunk_{coordinate.X}_{coordinate.Z}";
 
-		Entity entity = _scene.Add(
-			$"TerrainChunk_{coordinate.X}_{coordinate.Z}");
+		Mesh mesh = new(name, data);
+
+		Entity entity = _scene.Add(name);
 
 		Transform transform = entity.Add<Transform>();
 
@@ -415,104 +531,124 @@ public sealed class TerrainChunkManager : IDisposable
 	{
 		int resolution = _chunkSize * SubdivisionsPerCell;
 		int rowSize = resolution + 1;
+		int heightSide = resolution + 3;
+		int heightCount = heightSide * heightSide;
 
-		double sampleStep = 1.0 / SubdivisionsPerCell;
+		const double sampleStep = InvSubdivisions;
 
-		double firstCellX =
-			coordinate.X * _chunkSize - _chunkSize / 2.0;
+		double firstCellX = coordinate.X * _chunkSize - _halfChunkCells;
+		double firstCellZ = coordinate.Z * _chunkSize - _halfChunkCells;
 
-		double firstCellZ =
-			coordinate.Z * _chunkSize - _chunkSize / 2.0;
+		double[] heights = ArrayPool<double>.Shared.Rent(heightCount);
 
-		double[,] heights = new double[resolution + 3, resolution + 3];
-
-		for (int z = -1; z <= resolution + 1; z++)
+		try
 		{
-			cancellationToken.ThrowIfCancellationRequested();
-
-			for (int x = -1; x <= resolution + 1; x++)
+			for (int z = -1; z <= resolution + 1; z++)
 			{
-				double sampleX = firstCellX + x * sampleStep;
+				cancellationToken.ThrowIfCancellationRequested();
+
+				int rowOffset = (z + 1) * heightSide;
 				double sampleZ = firstCellZ + z * sampleStep;
 
-				heights[x + 1, z + 1] =
-					GetTerrainHeight(sampleX, sampleZ);
+				for (int x = -1; x <= resolution + 1; x++)
+				{
+					double sampleX = firstCellX + x * sampleStep;
+					heights[rowOffset + x + 1] =
+						GetTerrainHeight(sampleX, sampleZ);
+				}
 			}
-		}
 
-		List<DVector3> positions = new(rowSize * rowSize);
-		List<DVector3> normals = new(rowSize * rowSize);
-		List<DVector2> uvs = new(rowSize * rowSize);
-		List<uint> indices = new(resolution * resolution * 6);
+			int vertexCount = rowSize * rowSize;
+			int indexCount = resolution * resolution * 6;
 
-		for (int z = 0; z <= resolution; z++)
-		{
+			DVector3[] positions = new DVector3[vertexCount];
+			DVector3[] normals = new DVector3[vertexCount];
+			DVector2[] uvs = new DVector2[vertexCount];
+			uint[] indices = new uint[indexCount];
+
+			for (int z = 0; z <= resolution; z++)
+			{
+				cancellationToken.ThrowIfCancellationRequested();
+
+				int outputRow = z * rowSize;
+				int heightRow = (z + 1) * heightSide;
+
+				double localZ = (z * sampleStep - _halfChunkCells) * _blockSize;
+				double uvZ = z * sampleStep;
+
+				for (int x = 0; x <= resolution; x++)
+				{
+					int vertexIndex = outputRow + x;
+					int heightIndex = heightRow + x + 1;
+
+					double localX =
+						(x * sampleStep - _halfChunkCells) * _blockSize;
+
+					double height = heights[heightIndex];
+
+					double slopeX =
+						(heights[heightIndex + 1] -
+						 heights[heightIndex - 1])
+						* SubdivisionsPerCell * 0.5;
+
+					double slopeZ =
+						(heights[heightIndex + heightSide] -
+						 heights[heightIndex - heightSide])
+						* SubdivisionsPerCell * 0.5;
+
+					positions[vertexIndex] = new DVector3(
+						localX,
+						height * _blockSize,
+						localZ);
+
+					normals[vertexIndex] = Normalize(
+						new DVector3(-slopeX, 1.0, -slopeZ));
+
+					uvs[vertexIndex] = new DVector2(x * sampleStep, uvZ);
+				}
+			}
+
+			int indexOffset = 0;
+
+			for (int z = 0; z < resolution; z++)
+			{
+				cancellationToken.ThrowIfCancellationRequested();
+
+				int row = z * rowSize;
+				int nextRow = row + rowSize;
+
+				for (int x = 0; x < resolution; x++)
+				{
+					uint a = (uint)(row + x);
+					uint b = (uint)(nextRow + x);
+					uint c = b + 1;
+					uint d = a + 1;
+
+					indices[indexOffset++] = a;
+					indices[indexOffset++] = c;
+					indices[indexOffset++] = b;
+
+					indices[indexOffset++] = a;
+					indices[indexOffset++] = d;
+					indices[indexOffset++] = c;
+				}
+			}
+
 			cancellationToken.ThrowIfCancellationRequested();
 
-			for (int x = 0; x <= resolution; x++)
-			{
-				double localX =
-					(x * sampleStep - _chunkSize / 2.0) * _blockSize;
-
-				double localZ =
-					(z * sampleStep - _chunkSize / 2.0) * _blockSize;
-
-				double height = heights[x + 1, z + 1];
-
-				double slopeX =
-					(heights[x + 2, z + 1] - heights[x, z + 1])
-					* SubdivisionsPerCell * 0.5;
-
-				double slopeZ =
-					(heights[x + 1, z + 2] - heights[x + 1, z])
-					* SubdivisionsPerCell * 0.5;
-
-				DVector3 normal = Normalize(
-					new DVector3(-slopeX, 1.0, -slopeZ));
-
-				positions.Add(new DVector3(
-					localX,
-					height * _blockSize,
-					localZ));
-
-				normals.Add(normal);
-
-				uvs.Add(new DVector2(
-					x * sampleStep,
-					z * sampleStep));
-			}
+			return new MeshData(
+				positions,
+				indices,
+				normals,
+				uvs);
 		}
-
-		for (int z = 0; z < resolution; z++)
+		finally
 		{
-			cancellationToken.ThrowIfCancellationRequested();
-
-			for (int x = 0; x < resolution; x++)
-			{
-				uint a = (uint)(z * rowSize + x);
-				uint b = (uint)((z + 1) * rowSize + x);
-				uint c = b + 1;
-				uint d = a + 1;
-
-				indices.Add(a);
-				indices.Add(c);
-				indices.Add(b);
-
-				indices.Add(a);
-				indices.Add(d);
-				indices.Add(c);
-			}
+			ArrayPool<double>.Shared.Return(heights);
 		}
-
-		cancellationToken.ThrowIfCancellationRequested();
-
-		return new MeshData(
-			positions.ToArray(),
-			indices.ToArray(),
-			normals.ToArray(),
-			uvs.ToArray());
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static DVector3 Normalize(DVector3 value)
 	{
 		double length = Math.Sqrt(
@@ -523,39 +659,31 @@ public sealed class TerrainChunkManager : IDisposable
 		if (length <= 1e-12)
 			return new DVector3(0.0, 1.0, 0.0);
 
+		double inv = 1.0 / length;
+
 		return new DVector3(
-			value.X / length,
-			value.Y / length,
-			value.Z / length);
+			value.X * inv,
+			value.Y * inv,
+			value.Z * inv);
 	}
 
 	private double GetTerrainHeight(double cellX, double cellZ)
 	{
 		double total = 0.0;
-		double totalAmplitude = 0.0;
-		double amplitude = 1.0;
-		double frequency = _noiseScale;
 
-		for (int octave = 0; octave < Octaves; octave++)
+		for (int i = 0; i < Octaves; i++)
 		{
 			total += ValueNoise(
-				cellX * frequency,
-				cellZ * frequency,
-				unchecked(_seed + octave * 1013)) * amplitude;
-
-			totalAmplitude += amplitude;
-			amplitude *= Persistence;
-			frequency *= Lacunarity;
+				cellX * _octaveFrequencies[i],
+				cellZ * _octaveFrequencies[i],
+				_octaveSeedHashes[i]) * _octaveAmplitudes[i];
 		}
 
-		double noise = totalAmplitude > 0.0
-			? total / totalAmplitude
-			: 0.5;
-
-		return 1.0 + noise * (_maxHeight - 1);
+		return 1.0 + total * _invTotalAmplitude * _heightRange;
 	}
 
-	private static double ValueNoise(double x, double z, int seed)
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	private static double ValueNoise(double x, double z, uint seedHash)
 	{
 		double floorX = Math.Floor(x);
 		double floorZ = Math.Floor(z);
@@ -569,37 +697,40 @@ public sealed class TerrainChunkManager : IDisposable
 		double tz = Fade(z - floorZ);
 
 		double a = Lerp(
-			HashNoise(x0, z0, seed),
-			HashNoise(x1, z0, seed),
+			HashNoise(x0, z0, seedHash),
+			HashNoise(x1, z0, seedHash),
 			tx);
 
 		double b = Lerp(
-			HashNoise(x0, z1, seed),
-			HashNoise(x1, z1, seed),
+			HashNoise(x0, z1, seedHash),
+			HashNoise(x1, z1, seedHash),
 			tx);
 
 		return Lerp(a, b, tz);
 	}
 
-	private static double HashNoise(int x, int z, int seed)
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
+	private static double HashNoise(int x, int z, uint seedHash)
 	{
 		unchecked
 		{
 			uint value = (uint)x * 374761393u;
 			value += (uint)z * 668265263u;
-			value += (uint)seed * 2246822519u;
+			value += seedHash;
 			value = (value ^ (value >> 13)) * 1274126177u;
 			value ^= value >> 16;
 
-			return (value & 0x00FFFFFFu) / (double)0x00FFFFFFu;
+			return (value & 0x00FFFFFFu) * InvFF;
 		}
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static double Fade(double t)
 	{
 		return t * t * (3.0 - 2.0 * t);
 	}
 
+	[MethodImpl(MethodImplOptions.AggressiveInlining)]
 	private static double Lerp(double a, double b, double t)
 	{
 		return a + (b - a) * t;

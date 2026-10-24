@@ -149,7 +149,7 @@ try
 		blockSize: blockSize,
 		noiseScale: noiseScale,
 		seed: terrainSeed,
-		loadRadius: 9,
+		loadRadius: 12,
 		buildsPerFrame: 1,
 		animationDuration: 0.45);
 
