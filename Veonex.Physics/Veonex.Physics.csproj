@@ -7,16 +7,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="JoltPhysicsSharp" Version="2.23.0" />
+    <PackageReference Include="BepuPhysics" Version="2.4.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Veonex.Core\Veonex.Core.csproj" />
     <ProjectReference Include="..\Veonex.Mathematics\Veonex.Mathematics.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="Modules\" />
   </ItemGroup>
 
 </Project>
