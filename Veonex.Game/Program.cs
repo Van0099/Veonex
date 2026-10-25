@@ -50,22 +50,26 @@ try
 		new Material(
 			"CubeGreen",
 			"Basic",
-			new DVector4(0.48, 0.77, 0.23, 1.0)),
+			new DVector4(0.48, 0.77, 0.23, 1.0),
+			"textures/images.png"),
 
 		new Material(
 			"CubeBlue",
 			"Basic",
-			new DVector4(0.23, 0.55, 0.92, 1.0)),
+			new DVector4(0.23, 0.55, 0.92, 1.0),
+			"textures/images.png"),
 
 		new Material(
 			"CubeOrange",
 			"Basic",
-			new DVector4(0.95, 0.48, 0.18, 1.0)),
+			new DVector4(0.95, 0.48, 0.18, 1.0),
+			"textures/images.png"),
 
 		new Material(
 			"CubePurple",
 			"Basic",
-			new DVector4(0.65, 0.35, 0.88, 1.0))
+			new DVector4(0.65, 0.35, 0.88, 1.0),
+			"textures/images.png"),
 	];
 
 	Entity floorEntity = scene.Add("Floor");
@@ -179,7 +183,7 @@ try
 		Collider cubeCollider =
 			cubeEntity.Add<Collider>();
 
-		cubeCollider.SimpleGeometry = false;
+		cubeCollider.SimpleGeometry = true;
 
 		PhysicsBody cubeBody =
 			cubeEntity.Add<PhysicsBody>();

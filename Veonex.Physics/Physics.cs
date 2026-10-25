@@ -28,6 +28,21 @@ public sealed class Physics : IDisposable
 
 	private readonly Dictionary<Guid, PhysicsObject> _objects = [];
 
+	private readonly Dictionary<CollisionShapeKey, CachedCollisionShape>
+	_shapeCache = [];
+
+	private sealed class CachedCollisionShape
+	{
+		public CollisionShapeData Data { get; }
+
+		public int ReferenceCount { get; set; } = 1;
+
+		public CachedCollisionShape(CollisionShapeData data)
+		{
+			Data = data;
+		}
+	}
+
 	private DVector3 _gravity = new(0.0, -9.81, 0.0);
 
 	private double _accumulator;
@@ -409,6 +424,95 @@ public sealed class Physics : IDisposable
 		}
 	}
 
+	private CollisionShapeData AcquireCollisionShape(
+	SourceMesh mesh,
+	Transform transform,
+	Collider collider,
+	bool dynamic,
+	double mass,
+	out CollisionShapeKey key)
+	{
+		DVector3 effectiveScale = new(
+			transform.Scale.X * collider.SizePercent.X / 100.0,
+			transform.Scale.Y * collider.SizePercent.Y / 100.0,
+			transform.Scale.Z * collider.SizePercent.Z / 100.0);
+
+		DVector3 scaledOffset = new(
+			transform.Scale.X * collider.Offset.X,
+			transform.Scale.Y * collider.Offset.Y,
+			transform.Scale.Z * collider.Offset.Z);
+
+		// Dynamic triangle meshes have mass-dependent inertia.
+		// CollisionMesh also recenters dynamic mesh geometry while
+		// computing inertia, so dynamic/static forms are kept separate.
+		key = new CollisionShapeKey(
+			mesh.Id,
+			effectiveScale,
+			scaledOffset,
+			collider.SimpleGeometry,
+			dynamic,
+			dynamic ? mass : 0.0);
+
+		if (_shapeCache.TryGetValue(
+				key,
+				out CachedCollisionShape? cached))
+		{
+			cached.ReferenceCount =
+				checked(cached.ReferenceCount + 1);
+
+			return cached.Data;
+		}
+
+		CollisionShapeData data = CollisionMesh.Create(
+			_solver.Simulation,
+			_bufferPool,
+			mesh,
+			transform,
+			collider,
+			dynamic,
+			mass);
+
+		try
+		{
+			_shapeCache.Add(
+				key,
+				new CachedCollisionShape(data));
+		}
+		catch
+		{
+			_solver.Simulation.Shapes.RemoveAndDispose(
+				data.ShapeIndex,
+				_bufferPool);
+
+			throw;
+		}
+
+		return data;
+	}
+
+	private void ReleaseCollisionShape(CollisionShapeKey key)
+	{
+		if (!_shapeCache.TryGetValue(
+				key,
+				out CachedCollisionShape? cached))
+		{
+			throw new InvalidOperationException(
+				"Collision shape was not present in the shape cache.");
+		}
+
+		if (cached.ReferenceCount > 1)
+		{
+			cached.ReferenceCount--;
+			return;
+		}
+
+		_shapeCache.Remove(key);
+
+		_solver.Simulation.Shapes.RemoveAndDispose(
+			cached.Data.ShapeIndex,
+			_bufferPool);
+	}
+
 	private PhysicsObject CreateObject(
 		Entity entity,
 		Transform transform,
@@ -417,23 +521,24 @@ public sealed class Physics : IDisposable
 		SourceMesh mesh)
 	{
 		bool dynamic = bodyModule is not null;
+		double mass = bodyModule?.Mass ?? 1.0;
 
-		CollisionShapeData shape = CollisionMesh.Create(
-			_solver.Simulation,
-			_bufferPool,
+		CollisionShapeData shape = AcquireCollisionShape(
 			mesh,
 			transform,
 			collider,
 			dynamic,
-			bodyModule?.Mass ?? 1.0);
+			mass,
+			out CollisionShapeKey shapeKey);
 
 		PhysicsObject obj = new(
-			entity,
-			transform,
-			collider,
-			bodyModule,
-			mesh,
-			shape);
+				entity,
+				transform,
+				collider,
+				bodyModule,
+				mesh,
+				shape,
+				shapeKey);
 
 		bool bodyCreated = false;
 		bool staticCreated = false;
@@ -510,9 +615,7 @@ public sealed class Physics : IDisposable
 					obj.StaticHandle);
 			}
 
-			_solver.Simulation.Shapes.RemoveAndDispose(
-				shape.ShapeIndex,
-				_bufferPool);
+			ReleaseCollisionShape(shapeKey);
 
 			throw;
 		}
@@ -645,9 +748,7 @@ public sealed class Physics : IDisposable
 				obj.StaticHandle);
 		}
 
-		_solver.Simulation.Shapes.RemoveAndDispose(
-			obj.ShapeIndex,
-			_bufferPool);
+		ReleaseCollisionShape(obj.ShapeKey);
 	}
 
 	private static NVector3 GetBodyPosition(
