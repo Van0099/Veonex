@@ -858,42 +858,6 @@ public sealed unsafe class RenderBackend : IDisposable
 
 	private GraphicsDevice CreateGraphicsDevice()
 	{
-		if (!OperatingSystem.IsWindows())
-		{
-			throw new PlatformNotSupportedException(
-				"The current Veonex SDL3/Vulkan backend targets Windows.");
-		}
-
-		SDL_PropertiesID properties =
-			SDL3.SDL_GetWindowProperties(_window);
-
-		void* hwnd;
-		void* hinstance;
-
-		fixed (byte* hwndProperty =
-			SDL3.SDL_PROP_WINDOW_WIN32_HWND_POINTER)
-		fixed (byte* hinstanceProperty =
-			SDL3.SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER)
-		{
-			hwnd = (void*)SDL3.SDL_GetPointerProperty(
-				properties,
-				hwndProperty,
-				0);
-
-			hinstance = (void*)SDL3.SDL_GetPointerProperty(
-				properties,
-				hinstanceProperty,
-				0);
-		}
-
-		if (hwnd == null)
-			throw new InvalidOperationException(
-				"SDL3 did not provide a Win32 HWND.");
-
-		if (hinstance == null)
-			throw new InvalidOperationException(
-				"SDL3 did not provide a Win32 HINSTANCE.");
-
 		(int width, int height) = GetWindowPixelSize();
 
 		GraphicsDeviceOptions options = new(
@@ -907,9 +871,21 @@ public sealed unsafe class RenderBackend : IDisposable
 		_renderWidth = width;
 		_renderHeight = height;
 
-		SwapchainSource swapchainSource = SwapchainSource.CreateWin32(
-			(nint)hwnd,
-			(nint)hinstance);
+		SwapchainSource swapchainSource;
+
+		if (OperatingSystem.IsWindows())
+		{
+			swapchainSource = CreateWin32SwapchainSource();
+		}
+		else if (OperatingSystem.IsLinux())
+		{
+			swapchainSource = CreateLinuxSwapchainSource();
+		}
+		else
+		{
+			throw new PlatformNotSupportedException(
+				$"Veonex renderer does not support {RuntimeInformation.OSDescription} yet.");
+		}
 
 		SwapchainDescription swapchainDescription = new(
 			swapchainSource,
@@ -918,9 +894,83 @@ public sealed unsafe class RenderBackend : IDisposable
 			PixelFormat.D32_Float_S8_UInt,
 			_parameters.VSync);
 
-		return GraphicsDevice.CreateVulkan(
-			options,
-			swapchainDescription);
+		return GraphicsDevice.CreateVulkan(options, swapchainDescription);
+	}
+
+	private SwapchainSource CreateWin32SwapchainSource()
+	{
+		SDL_PropertiesID properties = SDL3.SDL_GetWindowProperties(_window);
+
+		void* hwnd;
+		void* hinstance;
+
+		fixed (byte* hwndProperty = SDL3.SDL_PROP_WINDOW_WIN32_HWND_POINTER)
+		fixed (byte* hinstanceProperty = SDL3.SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER)
+		{
+			hwnd = (void*)SDL3.SDL_GetPointerProperty(properties, hwndProperty, 0);
+			hinstance = (void*)SDL3.SDL_GetPointerProperty(properties, hinstanceProperty, 0);
+		}
+
+		if (hwnd == null)
+			throw new InvalidOperationException("SDL3 did not provide a Win32 HWND.");
+
+		if (hinstance == null)
+			throw new InvalidOperationException("SDL3 did not provide a Win32 HINSTANCE.");
+
+		return SwapchainSource.CreateWin32((nint)hwnd, (nint)hinstance);
+	}
+
+	private SwapchainSource CreateLinuxSwapchainSource()
+	{
+		SDL_PropertiesID properties = SDL3.SDL_GetWindowProperties(_window);
+
+		string? videoDriver = SDL3.SDL_GetCurrentVideoDriver();
+
+		if (videoDriver == "wayland")
+		{
+			void* display;
+			void* surface;
+
+			fixed (byte* displayProp = SDL3.SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER)
+			fixed (byte* surfaceProp = SDL3.SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER)
+			{
+				display = (void*)SDL3.SDL_GetPointerProperty(properties, displayProp, 0);
+				surface = (void*)SDL3.SDL_GetPointerProperty(properties, surfaceProp, 0);
+			}
+
+			if (display == null)
+				throw new InvalidOperationException("SDL3 did not provide a Wayland wl_display.");
+
+			if (surface == null)
+				throw new InvalidOperationException("SDL3 did not provide a Wayland wl_surface.");
+
+			return SwapchainSource.CreateWayland((nint)display, (nint)surface);
+		}
+
+		if (videoDriver == "x11")
+		{
+			void* display;
+			long window;
+
+			fixed (byte* displayProp = SDL3.SDL_PROP_WINDOW_X11_DISPLAY_POINTER)
+			fixed (byte* windowProp = SDL3.SDL_PROP_WINDOW_X11_WINDOW_NUMBER)
+			{
+				display = (void*)SDL3.SDL_GetPointerProperty(properties, displayProp, 0);
+				window = SDL3.SDL_GetNumberProperty(properties, windowProp, 0);
+			}
+
+			if (display == null)
+				throw new InvalidOperationException("SDL3 did not provide an X11 Display.");
+
+			if (window == 0)
+				throw new InvalidOperationException("SDL3 did not provide an X11 window.");
+
+			return SwapchainSource.CreateXlib((nint)display, (nint)window);
+		}
+
+		throw new PlatformNotSupportedException(
+			$"Veonex renderer does not support the SDL3 video driver '{videoDriver}' on Linux. " +
+			"Only 'x11' and 'wayland' are supported.");
 	}
 
 	private Pipeline CreatePipeline(bool transparent)
