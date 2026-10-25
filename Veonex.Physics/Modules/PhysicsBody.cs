@@ -8,55 +8,73 @@ namespace Veonex.Physics;
 /// </summary>
 public sealed class PhysicsBody : Module
 {
-    private double _mass = 1.0;
-    private double _drag = 0.05;
-    private double _angularDrag = 0.05;
+	private double _mass = 1.0;
+	private double _drag = 0.05;
+	private double _angularDrag = 0.05;
 
-    public double Mass
-    {
-        get => _mass;
-        set
-        {
-            if (!double.IsFinite(value) || value <= 0.0 || value > float.MaxValue)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(value),
-                    "Mass must be finite, greater than zero, and representable as a float.");
-            }
+	public double Mass
+	{
+		get => _mass;
 
-            _mass = value;
-        }
-    }
+		set
+		{
+			if (!double.IsFinite(value) ||
+				value <= 0.0 ||
+				value > float.MaxValue)
+			{
+				throw new ArgumentOutOfRangeException(
+					nameof(value),
+					"Mass must be finite, greater than zero, " +
+					"and representable as a float.");
+			}
 
-    /// <summary>
-    /// Linear velocity damping. Zero means no drag.
-    /// </summary>
-    public double Drag
-    {
-        get => _drag;
-        set => _drag = ValidateNonNegative(value, nameof(Drag));
-    }
+			_mass = value;
+		}
+	}
 
-    /// <summary>
-    /// Angular velocity damping. Zero means no angular drag.
-    /// </summary>
-    public double AngularDrag
-    {
-        get => _angularDrag;
-        set => _angularDrag = ValidateNonNegative(value, nameof(AngularDrag));
-    }
+	/// <summary>
+	/// Linear velocity damping. Zero means no drag.
+	/// </summary>
+	public double Drag
+	{
+		get => _drag;
 
-    public bool UseGravity { get; set; } = true;
+		set => _drag = ValidateNonNegative(
+			value,
+			nameof(Drag));
+	}
 
-    private static double ValidateNonNegative(double value, string propertyName)
-    {
-        if (!double.IsFinite(value) || value < 0.0)
-        {
-            throw new ArgumentOutOfRangeException(
-                propertyName,
-                "Value must be finite and non-negative.");
-        }
+	/// <summary>
+	/// Angular velocity damping. Zero means no angular drag.
+	/// </summary>
+	public double AngularDrag
+	{
+		get => _angularDrag;
 
-        return value;
-    }
+		set => _angularDrag = ValidateNonNegative(
+			value,
+			nameof(AngularDrag));
+	}
+
+	public bool UseGravity { get; set; } = true;
+
+	/// <summary>
+	/// Prevents this body from rotating when it collides with other objects.
+	/// Useful for upright players and other objects that should not tip over.
+	/// </summary>
+	public bool FreezeRotation { get; set; }
+
+	private static double ValidateNonNegative(
+		double value,
+		string propertyName)
+	{
+		if (!double.IsFinite(value) || value < 0.0)
+		{
+			throw new ArgumentOutOfRangeException(
+				propertyName,
+				"Value must be finite and non-negative.");
+		}
+
+		return value;
+	}
 }
