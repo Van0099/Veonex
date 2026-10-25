@@ -183,7 +183,7 @@ try
 		Collider cubeCollider =
 			cubeEntity.Add<Collider>();
 
-		cubeCollider.SimpleGeometry = true;
+		cubeCollider.SimpleGeometry = false;
 		cubeCollider.CollisionQuality = 0.5;
 
 		PhysicsBody cubeBody =
