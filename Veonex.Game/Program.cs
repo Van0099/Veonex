@@ -5,6 +5,7 @@ using Veonex.Input;
 using Veonex.Mathematics;
 using Veonex.Physics;
 using Veonex.Render;
+using Veonex.Assets;
 
 /// <summary>
 /// Physics sandbox: a physics-driven first-person player, a floor,
@@ -127,6 +128,9 @@ try
 	const double cubeScale = 0.5;
 	const double stackSpacing = 1.15;
 
+	IReadOnlyList<Mesh> loadedMeshes = ModelLoader.Load("model.glb");
+	Mesh modelMesh = loadedMeshes[0];
+
 	Random random = new(128);
 
 	for (int i = 0; i < cubeCount; i++)
@@ -167,7 +171,7 @@ try
 		MeshRenderer cubeRenderer =
 			cubeEntity.Add<MeshRenderer>();
 
-		cubeRenderer.Mesh = cubeMesh;
+		cubeRenderer.Mesh = modelMesh;
 
 		cubeRenderer.Material =
 			cubeMaterials[random.Next(cubeMaterials.Length)];
@@ -175,7 +179,7 @@ try
 		Collider cubeCollider =
 			cubeEntity.Add<Collider>();
 
-		cubeCollider.SimpleGeometry = true;
+		cubeCollider.SimpleGeometry = false;
 
 		PhysicsBody cubeBody =
 			cubeEntity.Add<PhysicsBody>();
