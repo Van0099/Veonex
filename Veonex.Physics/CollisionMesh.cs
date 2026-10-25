@@ -83,10 +83,17 @@ internal static class CollisionMesh
 
         ValidateIndices(data, sourceMesh.Name);
 
+        // Simplification affects only physics geometry. The original SourceMesh stays untouched
+        // and continues to be used by the renderer.
+        SimplifiedCollisionMesh simplified = CollisionMeshSimplifier.Simplify(
+            data,
+            collider.CollisionQuality);
+
         return CreateTriangleMesh(
             simulation,
             bufferPool,
-            data,
+            simplified.Positions,
+            simplified.Indices,
             sourceMesh.Name,
             effectiveScale,
             scaledOffset,
@@ -133,14 +140,15 @@ internal static class CollisionMesh
     private static CollisionShapeData CreateTriangleMesh(
         Simulation simulation,
         BufferPool bufferPool,
-        MeshData data,
+        DVector3[] positions,
+        int[] indices,
         string meshName,
         DVector3 scale,
         DVector3 scaledOffset,
         bool dynamic,
         double mass)
     {
-        int triangleCount = data.Indices.Length / 3;
+        int triangleCount = indices.Length / 3;
         bufferPool.Take<Triangle>(triangleCount, out var triangles);
 
         bool reverseWinding = scale.X * scale.Y * scale.Z < 0.0;
@@ -151,13 +159,13 @@ internal static class CollisionMesh
             {
                 int indexOffset = triangleIndex * 3;
 
-                int indexA = checked((int)data.Indices[indexOffset]);
-                int indexB = checked((int)data.Indices[indexOffset + 1]);
-                int indexC = checked((int)data.Indices[indexOffset + 2]);
+                int indexA = indices[indexOffset];
+                int indexB = indices[indexOffset + 1];
+                int indexC = indices[indexOffset + 2];
 
-                NVector3 a = ScalePosition(data.Positions[indexA], scale, meshName);
-                NVector3 b = ScalePosition(data.Positions[indexB], scale, meshName);
-                NVector3 c = ScalePosition(data.Positions[indexC], scale, meshName);
+                NVector3 a = ScalePosition(positions[indexA], scale, meshName);
+                NVector3 b = ScalePosition(positions[indexB], scale, meshName);
+                NVector3 c = ScalePosition(positions[indexC], scale, meshName);
 
                 // Bepu meshes are one-sided. Mirroring an odd number of axes reverses winding,
                 // so restore the original face orientation after baking the scale into vertices.

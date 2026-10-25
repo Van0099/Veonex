@@ -11,12 +11,35 @@ public sealed class Collider : Module
 {
     private DVector3 _sizePercent = new(100.0, 100.0, 100.0);
     private DVector3 _offset = DVector3.Zero;
+    private double _collisionQuality = 1.0;
 
     /// <summary>
     /// When enabled, collision geometry is an oriented box fitted to the mesh bounds.
     /// When disabled, the mesh's indexed triangles are used.
     /// </summary>
     public bool SimpleGeometry { get; set; }
+
+    /// <summary>
+    /// Target triangle ratio used to simplify complex collision geometry.
+    /// 1.0 keeps the original indexed mesh; 0.5 targets roughly half its triangles.
+    /// This setting is ignored when SimpleGeometry is enabled.
+    /// Valid range: greater than 0 and at most 1.
+    /// </summary>
+    public double CollisionQuality
+    {
+        get => _collisionQuality;
+        set
+        {
+            if (!double.IsFinite(value) || value <= 0.0 || value > 1.0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(CollisionQuality),
+                    "Collision quality must be finite, greater than zero, and at most 1.0.");
+            }
+
+            _collisionQuality = value;
+        }
+    }
 
     /// <summary>
     /// Per-axis scale of collision geometry expressed as percentages.

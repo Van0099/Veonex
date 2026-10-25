@@ -17,13 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="textures\**">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Update="model.glb">
+    <None Update="assets\**">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>

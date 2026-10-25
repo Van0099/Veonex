@@ -445,11 +445,18 @@ public sealed class Physics : IDisposable
 		// Dynamic triangle meshes have mass-dependent inertia.
 		// CollisionMesh also recenters dynamic mesh geometry while
 		// computing inertia, so dynamic/static forms are kept separate.
+		// CollisionQuality is part of the cache key only for complex mesh geometry.
+		// SimpleGeometry uses a bounds box, so quality has no effect there.
+		double collisionQuality = collider.SimpleGeometry
+			? 1.0
+			: collider.CollisionQuality;
+
 		key = new CollisionShapeKey(
 			mesh.Id,
 			effectiveScale,
 			scaledOffset,
 			collider.SimpleGeometry,
+			collisionQuality,
 			dynamic,
 			dynamic ? mass : 0.0);
 

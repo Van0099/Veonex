@@ -51,25 +51,25 @@ try
 			"CubeGreen",
 			"Basic",
 			new DVector4(0.48, 0.77, 0.23, 1.0),
-			"textures/images.png"),
+			"assets/textures/images.png"),
 
 		new Material(
 			"CubeBlue",
 			"Basic",
 			new DVector4(0.23, 0.55, 0.92, 1.0),
-			"textures/images.png"),
+			"assets/textures/images.png"),
 
 		new Material(
 			"CubeOrange",
 			"Basic",
 			new DVector4(0.95, 0.48, 0.18, 1.0),
-			"textures/images.png"),
+			"assets/textures/images.png"),
 
 		new Material(
 			"CubePurple",
 			"Basic",
 			new DVector4(0.65, 0.35, 0.88, 1.0),
-			"textures/images.png"),
+			"assets/textures/images.png"),
 	];
 
 	Entity floorEntity = scene.Add("Floor");
@@ -126,13 +126,13 @@ try
 	playerBody.UseGravity = true;
 	playerBody.FreezeRotation = true;
 
-	const int cubeCount = 100;
+	const int cubeCount = 24;
 	const int columnsPerAxis = 5;
 
 	const double cubeScale = 0.5;
 	const double stackSpacing = 1.15;
 
-	IReadOnlyList<Mesh> loadedMeshes = ModelLoader.Load("model.glb");
+	List<Mesh> loadedMeshes = new List<Mesh>(ModelLoader.Load("assets/models/model2.glb"));
 	Mesh modelMesh = loadedMeshes[0];
 
 	Random random = new(128);
@@ -184,11 +184,12 @@ try
 			cubeEntity.Add<Collider>();
 
 		cubeCollider.SimpleGeometry = true;
+		cubeCollider.CollisionQuality = 0.5;
 
 		PhysicsBody cubeBody =
 			cubeEntity.Add<PhysicsBody>();
 
-		cubeBody.Mass = 10.0;
+		cubeBody.Mass = 50.0;
 		cubeBody.Drag = 0.02;
 		cubeBody.AngularDrag = 0.08;
 		cubeBody.UseGravity = true;
