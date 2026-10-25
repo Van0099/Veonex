@@ -43,7 +43,8 @@ try
 	Material floorMaterial = new(
 		"PhysicsFloor",
 		"Basic",
-		new DVector4(0.22, 0.25, 0.29, 1.0));
+		new DVector4(1, 1, 1, 1.0),
+		"assets/textures/prototype.png");
 
 	Material[] cubeMaterials =
 	[
@@ -126,7 +127,7 @@ try
 	playerBody.UseGravity = true;
 	playerBody.FreezeRotation = true;
 
-	const int cubeCount = 24;
+	const int cubeCount = 100;
 	const int columnsPerAxis = 5;
 
 	const double cubeScale = 0.5;
@@ -184,7 +185,7 @@ try
 			cubeEntity.Add<Collider>();
 
 		cubeCollider.SimpleGeometry = false;
-		cubeCollider.CollisionQuality = 0.5;
+		cubeCollider.CollisionQuality = 1;
 
 		PhysicsBody cubeBody =
 			cubeEntity.Add<PhysicsBody>();
@@ -283,6 +284,8 @@ try
 		{
 			renderer.ToggleFullscreen();
 		}
+
+		scene.Update(deltaTime);
 
 		physics.Update(scene, deltaTime);
 

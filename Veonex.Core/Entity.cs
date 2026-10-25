@@ -3,18 +3,16 @@
 public sealed class Entity
 {
     private readonly Dictionary<Type, Module> _modules = [];
-    public Guid Id { get; }
+	public Guid Id { get; } = Guid.NewGuid();
 
-    internal Entity(Scene scene, string name)
-    {
-        Scene = scene;
-        Name = name;
-
-        Id = IdManager.Register(this);
-    }
+	internal Entity(Scene scene, string name)
+	{
+		Scene = scene;
+		Name = name;
+	}
 
 
-    public Scene Scene { get; }
+	public Scene Scene { get; }
 
 
     public string Name { get; private set; }
@@ -71,6 +69,14 @@ public sealed class Entity
             $"Entity does not contain module {typeof(T).Name}.");
     }
 
+	public bool Remove<T>() where T : Module
+	{
+		if (!_modules.Remove(typeof(T), out var module))
+			return false;
+		module.OnRemoved();
+		return true;
+	}
 
-    internal IEnumerable<Module> Modules => _modules.Values;
+
+	internal IEnumerable<Module> Modules => _modules.Values;
 }

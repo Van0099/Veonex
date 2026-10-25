@@ -31,9 +31,10 @@ public sealed class Scene
         if (!_entities.Remove(entity))
             return false;
 
-        _entityMap.Remove(entity.Name);
+		_entityMap.Remove(entity.Name);
 
-        IdManager.Unregister(entity.Id);
+		foreach (var module in entity.Modules)
+			module.OnRemoved();
 
         return true;
     }
@@ -94,5 +95,12 @@ public sealed class Scene
         while (_entityMap.ContainsKey(generated));
 
         return generated;
+    }
+
+    public void Update(double deltaTime)
+    {
+        foreach (var entity in _entities)
+            foreach (var module in entity.Modules)
+                module.Update(deltaTime);
     }
 }
