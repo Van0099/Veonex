@@ -288,7 +288,7 @@ try
 
 		playerController.UpdateCamera();
 
-		renderer.RenderFrame(scene, camera);
+		renderer.RenderFrame(scene, camera, currentTime);
 	}
 
 	stopwatch.Stop();

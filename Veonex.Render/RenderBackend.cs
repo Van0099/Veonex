@@ -371,10 +371,14 @@ public sealed unsafe class RenderBackend : IDisposable
 	private struct SkyBuffer
 	{
 		public Matrix4x4 InverseViewProjection;
+		public Vector4 Parameters;
 
-		public SkyBuffer(Matrix4x4 inverseViewProjection)
+		public SkyBuffer(
+			Matrix4x4 inverseViewProjection,
+			float time)
 		{
 			InverseViewProjection = inverseViewProjection;
+			Parameters = new Vector4(time, 0f, 0f, 0f);
 		}
 	}
 
@@ -1046,7 +1050,10 @@ public sealed unsafe class RenderBackend : IDisposable
 		return Factory.CreateGraphicsPipeline(description);
 	}
 
-	public void RenderFrame(Scene scene, Camera camera)
+	public void RenderFrame(
+		Scene scene,
+		Camera camera,
+		double time)
 	{
 		if (_renderWidth <= 0 || _renderHeight <= 0)
 			return;
@@ -1285,7 +1292,9 @@ public sealed unsafe class RenderBackend : IDisposable
 		_graphicsDevice.UpdateBuffer(
 			_skyBuffer,
 			0,
-			new SkyBuffer(inverseViewProjection));
+			new SkyBuffer(
+				inverseViewProjection,
+				(float)time));
 
 		int skyDrawCalls = 0;
 		int opaqueDrawCalls = 0;

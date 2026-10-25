@@ -11,18 +11,10 @@ void main()
         vec2(-1.0,  3.0)
     );
 
-    vec2 position =
-        positions[gl_VertexIndex];
+    vec2 position = positions[gl_VertexIndex];
 
-    gl_Position =
-        vec4(
-            position,
-            0.0,
-            1.0);
-
-    FragUV =
-        position * 0.5 +
-        0.5;
+    gl_Position = vec4(position, 0.0, 1.0);
+    FragUV = position * 0.5 + 0.5;
 }
 
 ###FRAG
@@ -31,87 +23,264 @@ void main()
 layout(set = 0, binding = 0) uniform SkyBuffer
 {
     mat4 InverseViewProjection;
+    vec4 Parameters;
 };
 
 layout(location = 0) in vec2 FragUV;
-
 layout(location = 0) out vec4 OutColor;
+
+float hash(vec2 p)
+{
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float noise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+
+    return mix(
+        mix(a, b, f.x),
+        mix(c, d, f.x),
+        f.y
+    );
+}
+
+float fbm(vec2 p)
+{
+    float value = 0.0;
+    float amplitude = 0.5;
+    mat2 transform = mat2(1.6, 1.2, -1.2, 1.6);
+
+    for (int i = 0; i < 5; i++)
+    {
+        value += noise(p) * amplitude;
+        p = transform * p + vec2(13.7, 9.2);
+        amplitude *= 0.5;
+    }
+
+    return value;
+}
 
 void main()
 {
+    float time = Parameters.x;
+
+    vec2 ndc = FragUV * 2.0 - 1.0;
+
     vec4 nearPoint =
         InverseViewProjection *
-        vec4(
-            FragUV * 2.0 - 1.0,
-            0.0,
-            1.0);
+        vec4(ndc, 0.0, 1.0);
 
     vec4 farPoint =
         InverseViewProjection *
-        vec4(
-            FragUV * 2.0 - 1.0,
-            1.0,
-            1.0);
+        vec4(ndc, 1.0, 1.0);
 
-    nearPoint /=
-        nearPoint.w;
+    nearPoint /= nearPoint.w;
+    farPoint /= farPoint.w;
 
-    farPoint /=
-        farPoint.w;
+    vec3 direction = normalize(
+        farPoint.xyz - nearPoint.xyz
+    );
 
-    vec3 direction =
-        normalize(
-            farPoint.xyz -
-            nearPoint.xyz);
+    float height = direction.y;
 
-    float height =
-        direction.y;
+    vec3 horizonColor = vec3(0.68, 0.81, 0.92);
+    vec3 zenithColor = vec3(0.12, 0.36, 0.74);
 
-    vec3 gray =
-        vec3(
-            0.28,
-            0.28,
-            0.30);
+    float skyGradient = pow(
+        clamp(height, 0.0, 1.0),
+        0.62
+    );
 
-    vec3 orange =
-        vec3(
-            0.90,
-            0.42,
-            0.10);
+    vec3 color = mix(
+        horizonColor,
+        zenithColor,
+        skyGradient
+    );
 
-    vec3 indigo =
-        vec3(
+    float horizonHaze =
+        1.0 - smoothstep(
+            0.0,
+            0.24,
+            max(height, 0.0)
+        );
+
+    color = mix(
+        color,
+        vec3(0.79, 0.86, 0.93),
+        horizonHaze * 0.16
+    );
+
+    vec3 sunDirection = normalize(
+        vec3(-0.32, 0.78, -0.53)
+    );
+
+    float sunDot = max(
+        dot(direction, sunDirection),
+        0.0
+    );
+
+    float sunHalo = pow(sunDot, 28.0);
+
+    color +=
+        vec3(1.0, 0.82, 0.61) *
+        sunHalo *
+        0.045;
+
+    float sunDisk = smoothstep(
+        0.99994,
+        0.999985,
+        sunDot
+    );
+
+    color = mix(
+        color,
+        vec3(1.0, 0.98, 0.89),
+        sunDisk
+    );
+
+    if (height > 0.05 && height < 0.93)
+    {
+        vec2 cloudUV = direction.xz /
+            max(height + 0.22, 0.30);
+
+        cloudUV *= 2.15;
+
+        cloudUV += vec2(
+            time * 0.009,
+            time * 0.0025
+        );
+
+        vec2 warp = vec2(
+            fbm(
+                cloudUV * 0.48 +
+                vec2(2.4, 1.7)
+            ),
+            fbm(
+                cloudUV * 0.48 +
+                vec2(8.2, 5.3)
+            )
+        );
+
+        cloudUV += (warp - 0.5) * 1.35;
+
+        float cloudBase = fbm(cloudUV * 1.15);
+
+        float cloudDetail = fbm(
+            cloudUV * 2.1 +
+            vec2(5.7, 11.3)
+        );
+
+        float cloudField =
+            cloudBase * 0.82 +
+            cloudDetail * 0.18;
+
+        float cloudMask = smoothstep(
+            0.43,
+            0.62,
+            cloudField
+        );
+
+        float lowerFade = smoothstep(
             0.12,
-            0.08,
-            0.32);
+            0.27,
+            height
+        );
 
-    float orangeFactor =
-        smoothstep(
-            -0.15,
-            0.15,
-            height);
+        float upperFade = 1.0 - smoothstep(
+            0.68,
+            0.88,
+            height
+        );
 
-    vec3 color =
-        mix(
-            gray,
-            orange,
-            orangeFactor);
+        float cloudAlpha =
+            cloudMask *
+            lowerFade *
+            upperFade *
+            0.88;
 
-    float indigoFactor =
-        smoothstep(
-            0.15,
-            0.75,
-            height);
+        vec3 cloudShadow = vec3(
+            0.61,
+            0.68,
+            0.75
+        );
 
-    color =
-        mix(
+        vec3 cloudLight = vec3(
+            1.0,
+            0.99,
+            0.97
+        );
+
+        float cloudLighting = smoothstep(
+            0.44,
+            0.66,
+            cloudField
+        );
+
+        vec3 cloudColor = mix(
+            cloudShadow,
+            cloudLight,
+            cloudLighting
+        );
+
+        cloudColor = mix(
+            cloudColor,
+            vec3(1.0, 0.99, 0.96),
+            sunHalo * 0.12
+        );
+
+        color = mix(
             color,
-            indigo,
-            indigoFactor);
+            cloudColor,
+            cloudAlpha
+        );
+    }
 
+    vec3 groundBottomColor = vec3(
+        0.29,
+        0.31,
+        0.33
+    );
 
-    OutColor =
-        vec4(
-            color,
-            1.0);
+    vec3 groundHorizonColor = vec3(
+        0.58,
+        0.61,
+        0.63
+    );
+
+    float groundGradient = smoothstep(
+        -0.85,
+        0.05,
+        height
+    );
+
+    vec3 groundColor = mix(
+        groundBottomColor,
+        groundHorizonColor,
+        groundGradient
+    );
+
+    float groundMask = 1.0 - smoothstep(
+        -0.035,
+        0.055,
+        height
+    );
+
+    color = mix(
+        color,
+        groundColor,
+        groundMask
+    );
+
+    OutColor = vec4(color, 1.0);
 }
