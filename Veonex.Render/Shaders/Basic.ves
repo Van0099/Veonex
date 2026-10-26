@@ -53,6 +53,12 @@ layout(set = 1, binding = 0) uniform MaterialBuffer
 layout(set = 1, binding = 1) uniform texture2D AlbedoTexture;
 layout(set = 1, binding = 2) uniform sampler AlbedoSampler;
 
+layout(set = 2, binding = 0) uniform LightingBuffer
+{
+    vec4 LightDirection;
+    vec4 LightColorIntensity;
+};
+
 layout(location = 0) in vec3 FragNormal;
 layout(location = 1) in vec2 FragUV;
 
@@ -61,21 +67,25 @@ layout(location = 0) out vec4 OutColor;
 void main()
 {
     vec3 normal = normalize(FragNormal);
-
-    vec3 lightDirection =
-        normalize(vec3(-0.5, 1.0, -0.75));
+    vec3 lightDirection = normalize(-LightDirection.xyz);
 
     float diffuse = max(
         dot(normal, lightDirection),
         0.0);
 
-    float lighting = 0.2 + diffuse * 0.8;
+    vec3 lighting =
+        vec3(0.2) +
+        diffuse *
+        0.8 *
+        LightColorIntensity.rgb *
+        LightColorIntensity.a;
 
     vec4 textureColor = texture(
         sampler2D(AlbedoTexture, AlbedoSampler),
         FragUV);
 
     vec4 finalColor = textureColor * AlbedoColor;
+
     float opacity = clamp(
         MaterialParameters.x,
         0.0,
@@ -85,7 +95,8 @@ void main()
         MaterialParameters.y,
         0.0);
 
-    vec3 emissive = EmissionColor.rgb * emissionStrength;
+    vec3 emissive =
+        EmissionColor.rgb * emissionStrength;
 
     OutColor = vec4(
         finalColor.rgb * lighting + emissive,

@@ -44,6 +44,10 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly ResourceSet _cameraResourceSet;
 	private readonly ResourceLayout _materialLayout;
 
+	private readonly ResourceLayout _lightingLayout;
+	private readonly DeviceBuffer _lightingBuffer;
+	private readonly ResourceSet _lightingResourceSet;
+
 	private readonly Dictionary<Guid, MeshBuffer> _meshCache = [];
 	private readonly Dictionary<Guid, MaterialResources> _materialCache = [];
 	private readonly Dictionary<string, Texture> _textureCache =
@@ -385,6 +389,22 @@ public sealed unsafe class RenderBackend : IDisposable
 	}
 
 	[StructLayout(LayoutKind.Sequential)]
+	private struct LightingBuffer
+	{
+		public Vector4 LightDirection;
+		public Vector4 LightColorIntensity;
+
+		public LightingBuffer(
+			Vector3 direction,
+			Vector3 color,
+			float intensity)
+		{
+			LightDirection = new Vector4(direction, 0.0f);
+			LightColorIntensity = new Vector4(color, intensity);
+		}
+	}
+
+	[StructLayout(LayoutKind.Sequential)]
 	private struct SkyBuffer
 	{
 		public Matrix4x4 InverseViewProjection;
@@ -512,6 +532,23 @@ public sealed unsafe class RenderBackend : IDisposable
 					"AlbedoSampler",
 					ResourceKind.Sampler,
 					ShaderStages.Fragment)));
+
+		_lightingLayout = Factory.CreateResourceLayout(
+			new ResourceLayoutDescription(
+				new ResourceLayoutElementDescription(
+					"LightingBuffer",
+					ResourceKind.UniformBuffer,
+					ShaderStages.Fragment)));
+
+		_lightingBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)Marshal.SizeOf<LightingBuffer>(),
+				BufferUsage.UniformBuffer));
+
+		_lightingResourceSet = Factory.CreateResourceSet(
+			new ResourceSetDescription(
+				_lightingLayout,
+				_lightingBuffer));
 
 		_skyLayout = Factory.CreateResourceLayout(
 			new ResourceLayoutDescription(
@@ -1082,7 +1119,8 @@ public sealed unsafe class RenderBackend : IDisposable
 			shaderSet,
 			[
 				_cameraLayout,
-				_materialLayout
+				_materialLayout,
+				_lightingLayout
 			],
 			_graphicsDevice.SwapchainFramebuffer.OutputDescription);
 
@@ -1128,6 +1166,8 @@ public sealed unsafe class RenderBackend : IDisposable
 			return;
 
 		UploadFrameBuffers(frame, time);
+
+		UpdateLighting(scene);
 
 		_commandList.Begin();
 
@@ -1189,6 +1229,61 @@ public sealed unsafe class RenderBackend : IDisposable
 			OpaqueInstanceCount = opaqueInstanceCount,
 			UseOcclusionCulling = useOcclusionCulling
 		};
+	}
+
+	private void UpdateLighting(Scene scene)
+	{
+		Vector3 direction = Vector3.UnitZ;
+		Vector3 color = Vector3.One;
+		float intensity = 0.0f;
+
+		foreach (Entity entity in scene.Entities)
+		{
+			if (!entity.Has<Light>())
+				continue;
+
+			Light light = entity.Get<Light>();
+
+			if (!light.Enabled ||
+				light.Type != LightType.Directional ||
+				!entity.Has<Transform>())
+			{
+				continue;
+			}
+
+			DVector3 directionD = light.Direction;
+
+			direction = new Vector3(
+				(float)directionD.X,
+				(float)directionD.Y,
+				(float)directionD.Z);
+
+			if (direction.LengthSquared() <= 0.000001f)
+			{
+				direction = Vector3.UnitZ;
+			}
+			else
+			{
+				direction = Vector3.Normalize(direction);
+			}
+
+			color = new Vector3(
+				(float)light.Color.X,
+				(float)light.Color.Y,
+				(float)light.Color.Z);
+
+			intensity = (float)light.Intensity;
+
+			break;
+		}
+
+		_graphicsDevice.UpdateBuffer(
+			_lightingBuffer,
+			0,
+			new LightingBuffer(
+				direction,
+				color,
+				intensity));
 	}
 
 	private void CollectVisibleInstances(
@@ -1464,6 +1559,7 @@ public sealed unsafe class RenderBackend : IDisposable
 	{
 		_commandList.SetPipeline(_pipeline);
 		_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
+		_commandList.SetGraphicsResourceSet(2, _lightingResourceSet);
 
 		foreach (KeyValuePair<BatchKey, DrawBatch> pair in _drawBatches)
 		{
@@ -2225,6 +2321,10 @@ public sealed unsafe class RenderBackend : IDisposable
 		_cameraLayout.Dispose();
 
 		_materialLayout.Dispose();
+
+		_lightingResourceSet.Dispose();
+		_lightingBuffer.Dispose();
+		_lightingLayout.Dispose();
 
 		_whiteTexture.Dispose();
 		_linearSampler.Dispose();

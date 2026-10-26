@@ -35,6 +35,16 @@ try
 	InputManager input = new();
 	Scene scene = new();
 
+	Entity lightEntity = scene.Add("DirectionalLight");
+
+	Transform lightTransform = lightEntity.Add<Transform>();
+	lightTransform.Rotation = new DVector3(45.0, 30.0, 0.0);
+
+	Light light = lightEntity.Add<Light>();
+	light.Type = LightType.Directional;
+	light.Color = new DVector3(0.5, 1.0, 1.0);
+	light.Intensity = 1.0;
+
 	physics.Gravity = new DVector3(0.0, -9.81, 0.0);
 
 	// All cubes use the same mesh.
