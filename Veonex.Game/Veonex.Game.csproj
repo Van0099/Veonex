@@ -22,4 +22,10 @@
     </None>
   </ItemGroup>
 
+	<ItemGroup>
+		<TrimmerRootAssembly Include="BepuPhysics" />
+		<TrimmerRootAssembly Include="BepuUtilities" />
+	</ItemGroup>
+
+
 </Project>

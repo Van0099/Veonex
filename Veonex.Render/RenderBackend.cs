@@ -107,6 +107,23 @@ public sealed unsafe class RenderBackend : IDisposable
 		Guid MeshId,
 		Guid MaterialId);
 
+	private sealed class FrameContext
+	{
+		public required Matrix4x4 ViewProjection;
+		public required Matrix4x4 InverseViewProjection;
+		public required FrustumPlane[] FrustumPlanes;
+
+		public required int TotalInstanceCount;
+		public required int OpaqueInstanceCount;
+		public required bool UseOcclusionCulling;
+
+		public int SkyDrawCalls;
+		public int OpaqueDrawCalls;
+		public int TransparentDrawCalls;
+
+		public bool HasVisibleInstances => TotalInstanceCount > 0;
+	}
+
 	[StructLayout(LayoutKind.Sequential)]
 	private struct InstanceData
 	{
@@ -830,9 +847,9 @@ public sealed unsafe class RenderBackend : IDisposable
 
 			if (window == null)
 			{
-				string error = SDL3.SDL_GetError();
+				string? error = SDL3.SDL_GetError();
 				throw new InvalidOperationException(
-					$"Failed to create SDL3 window: {error}");
+					$"Failed to create SDL3 window: {error ?? "unknown error"}");
 			}
 
 			return window;
@@ -1100,14 +1117,38 @@ public sealed unsafe class RenderBackend : IDisposable
 		return Factory.CreateGraphicsPipeline(description);
 	}
 
-	public void RenderFrame(
-		Scene scene,
-		Camera camera,
-		double time)
+	public void RenderFrame(Scene scene, Camera camera, double time)
 	{
 		if (_renderWidth <= 0 || _renderHeight <= 0)
 			return;
 
+		FrameContext frame = PrepareFrameContext(scene, camera, time);
+
+		if (!frame.HasVisibleInstances)
+			return;
+
+		UploadFrameBuffers(frame, time);
+
+		_commandList.Begin();
+
+		if (frame.UseOcclusionCulling)
+			RecordOcclusionCullingPass(frame);
+
+		RecordMainPass(frame);
+
+		_commandList.End();
+
+		_graphicsDevice.SubmitCommands(_commandList);
+		_graphicsDevice.SwapBuffers();
+
+		LogDrawCalls(frame);
+	}
+
+	private FrameContext PrepareFrameContext(
+	Scene scene,
+	Camera camera,
+	double time)
+	{
 		Transform cameraTransform = camera.Entity.Get<Transform>();
 		double cameraX = cameraTransform.Position.X;
 		double cameraY = cameraTransform.Position.Y;
@@ -1116,371 +1157,330 @@ public sealed unsafe class RenderBackend : IDisposable
 		float aspect = (float)_renderWidth / _renderHeight;
 		camera.AspectRatio = aspect;
 
-		// Вся геометрия переводится в систему координат относительно камеры.
-		// Поэтому View содержит только поворот, а позиция камеры остаётся double на CPU.
 		Matrix4x4 view = CreateViewMatrix(camera);
-
 		Matrix4x4 projection = Matrix4x4.CreatePerspectiveFieldOfView(
 			(float)(camera.FieldOfView * Math.PI / 180.0),
 			aspect,
 			(float)camera.NearClip,
 			(float)camera.FarClip);
-
 		Matrix4x4 viewProjection = view * projection;
 
-		if (!Matrix4x4.Invert(
-			viewProjection,
-			out Matrix4x4 inverseViewProjection))
-		{
-			return;
-		}
+		if (!Matrix4x4.Invert(viewProjection, out Matrix4x4 inverseViewProjection))
+			return EmptyFrameContext();
 
-		FrustumPlane[] frustumPlanes =
-			CreateFrustumPlanes(viewProjection);
+		FrustumPlane[] frustumPlanes = CreateFrustumPlanes(viewProjection);
 
-		foreach (DrawBatch batch in _drawBatches.Values)
-			batch.Reset();
+		ResetBatchCaches();
+		CollectVisibleInstances(scene, cameraX, cameraY, cameraZ, frustumPlanes);
+		SortTransparentBatches();
 
-		foreach (TransparentBatch batch in _transparentBatches.Values)
-			batch.Reset();
-
-		_sortedTransparentBatches.Clear();
-
-		foreach (Entity entity in scene.Entities)
-		{
-			if (!entity.Has<MeshRenderer>())
-				continue;
-
-			MeshRenderer renderer = entity.Get<MeshRenderer>();
-
-			if (!renderer.Visible ||
-				renderer.Mesh == null ||
-				renderer.Material == null ||
-				!renderer.Mesh.Data.HasNormals ||
-				!entity.Has<Transform>())
-			{
-				continue;
-			}
-
-			Mesh mesh = renderer.Mesh;
-			Material material = renderer.Material;
-
-			// Полностью прозрачные материалы не отправляем на отрисовку.
-			if (material.Opacity <= 0.0 || material.AlbedoColor.W <= 0.0)
-				continue;
-
-			BatchKey key = new(mesh.Id, material.Id);
-			Transform transform = entity.Get<Transform>();
-			InstanceData instance = CreateInstanceData(
-				transform,
-				cameraX,
-				cameraY,
-				cameraZ);
-
-			MeshBounds bounds = GetOrCreateMeshBounds(mesh);
-			Vector3 relativeCenter = Vector3.Transform(
-				bounds.Center,
-				instance.Model);
-
-			Vector3 scale = new(
-				(float)transform.Scale.X,
-				(float)transform.Scale.Y,
-				(float)transform.Scale.Z);
-
-			float maxScale = MathF.Max(
-				MathF.Abs(scale.X),
-				MathF.Max(
-					MathF.Abs(scale.Y),
-					MathF.Abs(scale.Z)));
-
-			float worldRadius = bounds.Radius * maxScale;
-
-			if (!IsSphereVisible(
-				relativeCenter,
-				worldRadius,
-				frustumPlanes))
-			{
-				continue;
-			}
-
-			if (IsTransparent(material))
-			{
-				// relativeCenter уже вычислен в системе координат относительно камеры.
-				float distanceSquared = relativeCenter.LengthSquared();
-
-				if (!_transparentBatches.TryGetValue(
-					key,
-					out TransparentBatch? transparentBatch))
-				{
-					transparentBatch = new TransparentBatch(mesh, material);
-					_transparentBatches.Add(key, transparentBatch);
-				}
-
-				transparentBatch.AddInstance(instance, distanceSquared);
-			}
-			else
-			{
-				if (!_drawBatches.TryGetValue(key, out DrawBatch? batch))
-				{
-					batch = new DrawBatch(mesh, material);
-					_drawBatches.Add(key, batch);
-				}
-
-				batch.AddInstance(instance, relativeCenter, worldRadius);
-			}
-		}
-
-		int totalInstanceCount = 0;
-
-		foreach (DrawBatch batch in _drawBatches.Values)
-			totalInstanceCount = checked(totalInstanceCount + batch.InstanceCount);
-
-		foreach (TransparentBatch batch in _transparentBatches.Values)
-		{
-			if (batch.InstanceCount == 0)
-				continue;
-
-			batch.SortInstances();
-			_sortedTransparentBatches.Add(batch);
-			totalInstanceCount = checked(totalInstanceCount + batch.InstanceCount);
-		}
-
-		_sortedTransparentBatches.Sort(static (left, right) =>
-			right.SortDistanceSquared.CompareTo(left.SortDistanceSquared));
-
-		int opaqueInstanceCount = 0;
-
-		if (totalInstanceCount > 0)
-		{
-			EnsureInstanceUploadCapacity(totalInstanceCount);
-
-			int instanceOffset = 0;
-			int batchIndex = 0;
-
-			foreach (DrawBatch batch in _drawBatches.Values)
-			{
-				if (batch.InstanceCount == 0)
-					continue;
-
-				batch.InstanceStart = instanceOffset;
-				batch.BatchIndex = batchIndex;
-				batch.CopyInstancesTo(_instanceUploadData, instanceOffset);
-				batch.CopyOcclusionInstancesTo(_occlusionUploadData, instanceOffset);
-				_occlusionIndirectUploadData[batchIndex] = new IndirectDrawIndexedArguments
-				{
-					IndexCount = checked((uint)batch.Mesh.Data.IndexCount),
-					InstanceCount = 0,
-					FirstIndex = 0,
-					VertexOffset = 0,
-					FirstInstance = 0
-				};
-				batchIndex++;
-				instanceOffset += batch.InstanceCount;
-			}
-
-			opaqueInstanceCount = instanceOffset;
-
-			foreach (TransparentBatch batch in _sortedTransparentBatches)
-			{
-				batch.InstanceStart = instanceOffset;
-				batch.CopyInstancesTo(_instanceUploadData, instanceOffset);
-				instanceOffset += batch.InstanceCount;
-			}
-
-			EnsureInstanceBufferCapacity(_instanceUploadData.Length);
-
-			_graphicsDevice.UpdateBuffer(
-				_instanceBuffer!,
-				0,
-				ref _instanceUploadData[0],
-				checked((uint)(totalInstanceCount * InstanceDataSize)));
-
-			if (_occlusionCullingSupported && opaqueInstanceCount >= 64)
-			{
-				EnsureOcclusionBuffersCapacity(totalInstanceCount);
-				_graphicsDevice.UpdateBuffer(
-					_occlusionMetadataBuffer!, 0, ref _occlusionUploadData[0],
-					checked((uint)(opaqueInstanceCount * OcclusionInstanceDataSize)));
-				int opaqueBatchCount = 0;
-				foreach (DrawBatch batch in _drawBatches.Values)
-				{
-					if (batch.InstanceCount > 0)
-						opaqueBatchCount++;
-				}
-				if (opaqueBatchCount > 0)
-				{
-					_graphicsDevice.UpdateBuffer(
-						_occlusionIndirectBuffer!, 0, ref _occlusionIndirectUploadData[0],
-						checked((uint)(opaqueBatchCount * IndexedIndirectCommandSize)));
-				}
-			}
-		}
+		int totalInstanceCount = CountVisibleInstances();
+		int opaqueInstanceCount = PackInstanceData(totalInstanceCount);
 
 		bool useOcclusionCulling =
 			_occlusionCullingSupported && opaqueInstanceCount >= 64;
 
-		if (useOcclusionCulling)
+		return new FrameContext
 		{
+			ViewProjection = viewProjection,
+			InverseViewProjection = inverseViewProjection,
+			FrustumPlanes = frustumPlanes,
+			TotalInstanceCount = totalInstanceCount,
+			OpaqueInstanceCount = opaqueInstanceCount,
+			UseOcclusionCulling = useOcclusionCulling
+		};
+	}
+
+	private void CollectVisibleInstances(
+	Scene scene,
+	double cameraX,
+	double cameraY,
+	double cameraZ,
+	FrustumPlane[] frustumPlanes)
+	{
+		foreach (Entity entity in scene.Entities)
+		{
+			if (!TryGetRenderable(entity, out Mesh mesh, out Material material, out Transform transform))
+				continue;
+
+			BatchKey key = new(mesh.Id, material.Id);
+			InstanceData instance = CreateInstanceData(
+				transform, cameraX, cameraY, cameraZ);
+
+			MeshBounds bounds = GetOrCreateMeshBounds(mesh);
+			Vector3 relativeCenter = Vector3.Transform(bounds.Center, instance.Model);
+			float worldRadius = ComputeWorldRadius(bounds, transform);
+
+			if (!IsSphereVisible(relativeCenter, worldRadius, frustumPlanes))
+				continue;
+
+			AddInstanceToBatch(key, mesh, material, instance, relativeCenter, worldRadius);
+		}
+	}
+
+	private static bool TryGetRenderable(
+	Entity entity,
+	out Mesh mesh,
+	out Material material,
+	out Transform transform)
+	{
+		mesh = null!;
+		material = null!;
+		transform = default!;
+
+		if (!entity.Has<MeshRenderer>())
+			return false;
+
+		MeshRenderer renderer = entity.Get<MeshRenderer>();
+		if (!renderer.Visible ||
+			renderer.Mesh == null ||
+			renderer.Material == null ||
+			!renderer.Mesh.Data.HasNormals ||
+			!entity.Has<Transform>())
+			return false;
+
+		if (renderer.Material.Opacity <= 0.0 || renderer.Material.AlbedoColor.W <= 0.0)
+			return false;
+
+		mesh = renderer.Mesh;
+		material = renderer.Material;
+		transform = entity.Get<Transform>();
+		return true;
+	}
+
+	private void ResetBatchCaches()
+	{
+		foreach (DrawBatch batch in _drawBatches.Values)
+			batch.Reset();
+		foreach (TransparentBatch batch in _transparentBatches.Values)
+			batch.Reset();
+		_sortedTransparentBatches.Clear();
+	}
+
+	private void SortTransparentBatches()
+	{
+		foreach (TransparentBatch batch in _transparentBatches.Values)
+		{
+			if (batch.InstanceCount == 0)
+				continue;
+			batch.SortInstances();
+			_sortedTransparentBatches.Add(batch);
+		}
+
+		_sortedTransparentBatches.Sort(static (left, right) =>
+			right.SortDistanceSquared.CompareTo(left.SortDistanceSquared));
+	}
+
+	private int CountVisibleInstances()
+	{
+		int total = 0;
+		foreach (DrawBatch batch in _drawBatches.Values)
+			total = checked(total + batch.InstanceCount);
+		foreach (TransparentBatch batch in _sortedTransparentBatches)
+			total = checked(total + batch.InstanceCount);
+		return total;
+	}
+
+	private int PackInstanceData(int totalInstanceCount)
+	{
+		if (totalInstanceCount == 0)
+			return 0;
+
+		EnsureInstanceUploadCapacity(totalInstanceCount);
+
+		int instanceOffset = 0;
+		int batchIndex = 0;
+
+		foreach (DrawBatch batch in _drawBatches.Values)
+		{
+			if (batch.InstanceCount == 0)
+				continue;
+
+			batch.InstanceStart = instanceOffset;
+			batch.BatchIndex = batchIndex;
+			batch.CopyInstancesTo(_instanceUploadData, instanceOffset);
+			batch.CopyOcclusionInstancesTo(_occlusionUploadData, instanceOffset);
+			_occlusionIndirectUploadData[batchIndex] = new IndirectDrawIndexedArguments
+			{
+				IndexCount = checked((uint)batch.Mesh.Data.IndexCount),
+				InstanceCount = 0,
+				FirstIndex = 0,
+				VertexOffset = 0,
+				FirstInstance = 0
+			};
+			batchIndex++;
+			instanceOffset += batch.InstanceCount;
+		}
+
+		int opaqueInstanceCount = instanceOffset;
+
+		foreach (TransparentBatch batch in _sortedTransparentBatches)
+		{
+			batch.InstanceStart = instanceOffset;
+			batch.CopyInstancesTo(_instanceUploadData, instanceOffset);
+			instanceOffset += batch.InstanceCount;
+		}
+
+		return opaqueInstanceCount;
+	}
+
+	private void UploadFrameBuffers(FrameContext frame, double time)
+	{
+		EnsureInstanceBufferCapacity(_instanceUploadData.Length);
+
+		_graphicsDevice.UpdateBuffer(
+			_instanceBuffer!,
+			0,
+			ref _instanceUploadData[0],
+			checked((uint)(frame.TotalInstanceCount * InstanceDataSize)));
+
+		if (frame.UseOcclusionCulling)
+		{
+			EnsureOcclusionBuffersCapacity(frame.TotalInstanceCount);
+			_graphicsDevice.UpdateBuffer(
+				_occlusionMetadataBuffer!, 0, ref _occlusionUploadData[0],
+				checked((uint)(frame.OpaqueInstanceCount * OcclusionInstanceDataSize)));
+
+			int opaqueBatchCount = CountOpaqueBatches();
+			if (opaqueBatchCount > 0)
+			{
+				_graphicsDevice.UpdateBuffer(
+					_occlusionIndirectBuffer!, 0, ref _occlusionIndirectUploadData[0],
+					checked((uint)(opaqueBatchCount * IndexedIndirectCommandSize)));
+			}
+
 			EnsureOcclusionTextures();
 			_graphicsDevice.UpdateBuffer(
 				_occlusionCullParametersBuffer!,
 				0,
 				new OcclusionCullParameters(
-					viewProjection,
+					frame.ViewProjection,
 					_renderWidth,
 					_renderHeight,
 					_hiZMipViews.Length,
-					opaqueInstanceCount,
+					frame.OpaqueInstanceCount,
 					_graphicsDevice.IsClipSpaceYInverted));
 		}
 
 		_graphicsDevice.UpdateBuffer(
-			_cameraBuffer,
-			0,
-			new CameraBuffer(viewProjection));
+			_cameraBuffer, 0, new CameraBuffer(frame.ViewProjection));
 
 		_graphicsDevice.UpdateBuffer(
 			_skyBuffer,
 			0,
-			new SkyBuffer(
-				inverseViewProjection,
-				(float)time));
+			new SkyBuffer(frame.InverseViewProjection, (float)time));
+	}
 
-		int skyDrawCalls = 0;
-		int opaqueDrawCalls = 0;
-		int transparentDrawCalls = 0;
+	private int CountOpaqueBatches()
+	{
+		int count = 0;
+		foreach (DrawBatch batch in _drawBatches.Values)
+			if (batch.InstanceCount > 0)
+				count++;
+		return count;
+	}
 
-		_commandList.Begin();
+	private void RecordOcclusionCullingPass(FrameContext frame)
+	{
+		_commandList.SetFramebuffer(_occlusionFramebuffer!);
+		_commandList.SetFullViewports();
+		_commandList.ClearDepthStencil(1.0f);
+		_commandList.SetPipeline(_occlusionDepthPipeline!);
+		_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
 
-		if (useOcclusionCulling)
+		foreach (DrawBatch batch in _drawBatches.Values)
 		{
-			_commandList.SetFramebuffer(_occlusionFramebuffer!);
-			_commandList.SetFullViewports();
-			_commandList.ClearDepthStencil(1.0f);
-			_commandList.SetPipeline(_occlusionDepthPipeline!);
-			_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
+			if (batch.InstanceCount == 0)
+				continue;
 
-			foreach (DrawBatch batch in _drawBatches.Values)
-			{
-				if (batch.InstanceCount == 0)
-					continue;
-
-				MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
-				_commandList.SetVertexBuffer(0, meshBuffer.PositionBuffer);
-				if (meshBuffer.NormalBuffer != null)
-					_commandList.SetVertexBuffer(1, meshBuffer.NormalBuffer);
-				if (meshBuffer.UVBuffer != null)
-					_commandList.SetVertexBuffer(2, meshBuffer.UVBuffer);
-				_commandList.SetVertexBuffer(3, _instanceBuffer!, checked((uint)(batch.InstanceStart * InstanceDataSize)));
-				_commandList.SetIndexBuffer(meshBuffer.IndexBuffer, IndexFormat.UInt32);
-				_commandList.DrawIndexed(meshBuffer.IndexCount, (uint)batch.InstanceCount, 0, 0, 0);
-			}
-
-			_commandList.SetPipeline(_hiZCopyPipeline!);
-			_commandList.SetComputeResourceSet(0, _hiZCopyResourceSet!);
-			_commandList.Dispatch((uint)((_renderWidth + 7) / 8), (uint)((_renderHeight + 7) / 8), 1);
-
-			_commandList.SetPipeline(_hiZDownsamplePipeline!);
-			for (int mip = 1; mip < _hiZMipViews.Length; mip++)
-			{
-				_commandList.SetComputeResourceSet(0, _hiZDownsampleResourceSets[mip - 1]);
-				int mipWidth = Math.Max(1, _renderWidth >> mip);
-				int mipHeight = Math.Max(1, _renderHeight >> mip);
-				_commandList.Dispatch((uint)((mipWidth + 7) / 8), (uint)((mipHeight + 7) / 8), 1);
-			}
-
-			_commandList.SetPipeline(_occlusionCullPipeline!);
-			_commandList.SetComputeResourceSet(0, _occlusionCullResourceSet!);
-			_commandList.Dispatch((uint)((opaqueInstanceCount + 63) / 64), 1, 1);
+			MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
+			_commandList.SetVertexBuffer(0, meshBuffer.PositionBuffer);
+			if (meshBuffer.NormalBuffer != null)
+				_commandList.SetVertexBuffer(1, meshBuffer.NormalBuffer);
+			if (meshBuffer.UVBuffer != null)
+				_commandList.SetVertexBuffer(2, meshBuffer.UVBuffer);
+			_commandList.SetVertexBuffer(3, _instanceBuffer!,
+				checked((uint)(batch.InstanceStart * InstanceDataSize)));
+			_commandList.SetIndexBuffer(meshBuffer.IndexBuffer, IndexFormat.UInt32);
+			_commandList.DrawIndexed(
+				meshBuffer.IndexCount, (uint)batch.InstanceCount, 0, 0, 0);
 		}
 
-		_commandList.SetFramebuffer(
-			_graphicsDevice.SwapchainFramebuffer);
+		BuildHiZMipChain();
+		DispatchOcclusionCull(frame);
+	}
 
+	private void BuildHiZMipChain()
+	{
+		_commandList.SetPipeline(_hiZCopyPipeline!);
+		_commandList.SetComputeResourceSet(0, _hiZCopyResourceSet!);
+		_commandList.Dispatch(
+			(uint)((_renderWidth + 7) / 8),
+			(uint)((_renderHeight + 7) / 8),
+			1);
+
+		_commandList.SetPipeline(_hiZDownsamplePipeline!);
+		for (int mip = 1; mip < _hiZMipViews.Length; mip++)
+		{
+			_commandList.SetComputeResourceSet(0, _hiZDownsampleResourceSets[mip - 1]);
+			int mipWidth = Math.Max(1, _renderWidth >> mip);
+			int mipHeight = Math.Max(1, _renderHeight >> mip);
+			_commandList.Dispatch(
+				(uint)((mipWidth + 7) / 8),
+				(uint)((mipHeight + 7) / 8),
+				1);
+		}
+	}
+
+	private void DispatchOcclusionCull(FrameContext frame)
+	{
+		_commandList.SetPipeline(_occlusionCullPipeline!);
+		_commandList.SetComputeResourceSet(0, _occlusionCullResourceSet!);
+		_commandList.Dispatch(
+			(uint)((frame.OpaqueInstanceCount + 63) / 64), 1, 1);
+	}
+
+	private void RecordMainPass(FrameContext frame)
+	{
+		_commandList.SetFramebuffer(_graphicsDevice.SwapchainFramebuffer);
 		_commandList.SetFullViewports();
 		_commandList.ClearColorTarget(0, RgbaFloat.Black);
 		_commandList.ClearDepthStencil(1.0f);
 
+		RecordSkyPass(frame);
+		RecordOpaquePass(frame);
+		RecordTransparentPass(frame);
+	}
+
+	private void RecordSkyPass(FrameContext frame)
+	{
 		_commandList.SetPipeline(_skyPipeline);
 		_commandList.SetGraphicsResourceSet(0, _skyResourceSet);
 		_commandList.Draw(3);
-		skyDrawCalls++;
+		frame.SkyDrawCalls++;
+	}
 
+	private void RecordOpaquePass(FrameContext frame)
+	{
 		_commandList.SetPipeline(_pipeline);
 		_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
 
 		foreach (KeyValuePair<BatchKey, DrawBatch> pair in _drawBatches)
 		{
 			DrawBatch batch = pair.Value;
-
 			if (batch.InstanceCount == 0)
 				continue;
 
-			Material material = batch.Material;
-			MaterialResources materialResources =
-				GetOrCreateMaterialResources(material);
-
-			Vector4 albedoColor = new(
-				(float)material.AlbedoColor.X,
-				(float)material.AlbedoColor.Y,
-				(float)material.AlbedoColor.Z,
-				(float)material.AlbedoColor.W);
-
-			Vector4 emissionColor = new(
-				(float)material.EmissionColor.X,
-				(float)material.EmissionColor.Y,
-				(float)material.EmissionColor.Z,
-				(float)material.EmissionColor.W);
-
-			_graphicsDevice.UpdateBuffer(
-				materialResources.Buffer,
-				0,
-				new MaterialBuffer(
-					albedoColor,
-					(float)material.Opacity,
-					emissionColor,
-					(float)material.EmissionStrength));
+			BindMaterial(batch.Material);
 
 			MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
+			BindMeshVertices(meshBuffer, batch.InstanceStart);
 
-			_commandList.SetGraphicsResourceSet(
-				1,
-				materialResources.ResourceSet);
-
-			_commandList.SetVertexBuffer(
-				0,
-				meshBuffer.PositionBuffer);
-
-			if (meshBuffer.NormalBuffer != null)
+			if (frame.UseOcclusionCulling)
 			{
-				_commandList.SetVertexBuffer(
-					1,
-					meshBuffer.NormalBuffer);
-			}
+				_commandList.SetVertexBuffer(3, _occlusionVisibleInstanceBuffer!,
+					checked((uint)(batch.InstanceStart * InstanceDataSize)));
 
-			if (meshBuffer.UVBuffer != null)
-			{
-				_commandList.SetVertexBuffer(
-					2,
-					meshBuffer.UVBuffer);
-			}
-
-			uint instanceBufferOffset = checked(
-				(uint)(batch.InstanceStart * InstanceDataSize));
-
-			_commandList.SetVertexBuffer(
-				3,
-				useOcclusionCulling
-					? _occlusionVisibleInstanceBuffer!
-					: _instanceBuffer!,
-				instanceBufferOffset);
-
-			_commandList.SetIndexBuffer(
-				meshBuffer.IndexBuffer,
-				IndexFormat.UInt32);
-
-			if (useOcclusionCulling)
-			{
 				_commandList.DrawIndexedIndirect(
 					_occlusionIndirectBuffer!,
 					checked((uint)(batch.BatchIndex * IndexedIndirectCommandSize)),
@@ -1489,107 +1489,153 @@ public sealed unsafe class RenderBackend : IDisposable
 			}
 			else
 			{
-				_commandList.DrawIndexed(
-					meshBuffer.IndexCount,
-					(uint)batch.InstanceCount,
-					0,
-					0,
-					0);
-			}
-			opaqueDrawCalls++;
-		}
-
-		if (_sortedTransparentBatches.Count > 0)
-		{
-			_commandList.SetPipeline(_transparentPipeline);
-			_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
-
-			foreach (TransparentBatch batch in _sortedTransparentBatches)
-			{
-				Material material = batch.Material;
-				MaterialResources materialResources =
-					GetOrCreateMaterialResources(material);
-
-				Vector4 albedoColor = new(
-					(float)material.AlbedoColor.X,
-					(float)material.AlbedoColor.Y,
-					(float)material.AlbedoColor.Z,
-					(float)material.AlbedoColor.W);
-
-				Vector4 emissionColor = new(
-					(float)material.EmissionColor.X,
-					(float)material.EmissionColor.Y,
-					(float)material.EmissionColor.Z,
-					(float)material.EmissionColor.W);
-
-				_graphicsDevice.UpdateBuffer(
-					materialResources.Buffer,
-					0,
-					new MaterialBuffer(
-						albedoColor,
-						(float)material.Opacity,
-						emissionColor,
-						(float)material.EmissionStrength));
-
-				MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
-
-				_commandList.SetGraphicsResourceSet(
-					1,
-					materialResources.ResourceSet);
-
-				_commandList.SetVertexBuffer(0, meshBuffer.PositionBuffer);
-
-				if (meshBuffer.NormalBuffer != null)
-					_commandList.SetVertexBuffer(1, meshBuffer.NormalBuffer);
-
-				if (meshBuffer.UVBuffer != null)
-					_commandList.SetVertexBuffer(2, meshBuffer.UVBuffer);
-
-				uint instanceBufferOffset = checked(
-					(uint)(batch.InstanceStart * InstanceDataSize));
-
-				_commandList.SetVertexBuffer(
-					3,
-					_instanceBuffer!,
-					instanceBufferOffset);
-
-				_commandList.SetIndexBuffer(
-					meshBuffer.IndexBuffer,
-					IndexFormat.UInt32);
+				_commandList.SetVertexBuffer(3, _instanceBuffer!,
+					checked((uint)(batch.InstanceStart * InstanceDataSize)));
 
 				_commandList.DrawIndexed(
 					meshBuffer.IndexCount,
 					(uint)batch.InstanceCount,
-					0,
-					0,
-					0);
-				transparentDrawCalls++;
+					0, 0, 0);
 			}
-		}
 
-		_commandList.End();
-
-		_graphicsDevice.SubmitCommands(_commandList);
-		_graphicsDevice.SwapBuffers();
-
-		long currentTime = Environment.TickCount64;
-
-		if (currentTime - _lastDrawCallLogTime >= 1000)
-		{
-			_lastDrawCallLogTime = currentTime;
-
-			int totalDrawCalls =
-				skyDrawCalls +
-				opaqueDrawCalls +
-				transparentDrawCalls;
-
-			System.Console.WriteLine(
-				$"Draw calls: {totalDrawCalls} " +
-				$"(Sky: {skyDrawCalls}, Opaque: {opaqueDrawCalls}, " +
-				$"Transparent: {transparentDrawCalls}) | " +
-				$"Instances: {totalInstanceCount}");
+			frame.OpaqueDrawCalls++;
 		}
 	}
+
+	private void RecordTransparentPass(FrameContext frame)
+	{
+		if (_sortedTransparentBatches.Count == 0)
+			return;
+
+		_commandList.SetPipeline(_transparentPipeline);
+		_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
+
+		foreach (TransparentBatch batch in _sortedTransparentBatches)
+		{
+			BindMaterial(batch.Material);
+
+			MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
+			BindMeshVertices(meshBuffer, batch.InstanceStart);
+			_commandList.SetVertexBuffer(3, _instanceBuffer!,
+				checked((uint)(batch.InstanceStart * InstanceDataSize)));
+
+			_commandList.DrawIndexed(
+				meshBuffer.IndexCount,
+				(uint)batch.InstanceCount,
+				0, 0, 0);
+
+			frame.TransparentDrawCalls++;
+		}
+	}
+
+	private void BindMaterial(Material material)
+	{
+		MaterialResources resources = GetOrCreateMaterialResources(material);
+
+		Vector4 albedoColor = new(
+			(float)material.AlbedoColor.X,
+			(float)material.AlbedoColor.Y,
+			(float)material.AlbedoColor.Z,
+			(float)material.AlbedoColor.W);
+
+		Vector4 emissionColor = new(
+			(float)material.EmissionColor.X,
+			(float)material.EmissionColor.Y,
+			(float)material.EmissionColor.Z,
+			(float)material.EmissionColor.W);
+
+		_graphicsDevice.UpdateBuffer(
+			resources.Buffer, 0,
+			new MaterialBuffer(
+				albedoColor,
+				(float)material.Opacity,
+				emissionColor,
+				(float)material.EmissionStrength));
+
+		_commandList.SetGraphicsResourceSet(1, resources.ResourceSet);
+	}
+
+	private void BindMeshVertices(MeshBuffer meshBuffer, int instanceStart)
+	{
+		_commandList.SetVertexBuffer(0, meshBuffer.PositionBuffer);
+		if (meshBuffer.NormalBuffer != null)
+			_commandList.SetVertexBuffer(1, meshBuffer.NormalBuffer);
+		if (meshBuffer.UVBuffer != null)
+			_commandList.SetVertexBuffer(2, meshBuffer.UVBuffer);
+
+		_commandList.SetIndexBuffer(meshBuffer.IndexBuffer, IndexFormat.UInt32);
+	}
+
+	private static float ComputeWorldRadius(MeshBounds bounds, Transform transform)
+	{
+		Vector3 scale = new(
+			(float)transform.Scale.X,
+			(float)transform.Scale.Y,
+			(float)transform.Scale.Z);
+
+		float maxScale = MathF.Max(
+			MathF.Abs(scale.X),
+			MathF.Max(MathF.Abs(scale.Y), MathF.Abs(scale.Z)));
+
+		return bounds.Radius * maxScale;
+	}
+
+	private void AddInstanceToBatch(
+		BatchKey key,
+		Mesh mesh,
+		Material material,
+		InstanceData instance,
+		Vector3 relativeCenter,
+		float worldRadius)
+	{
+		if (IsTransparent(material))
+		{
+			float distanceSquared = relativeCenter.LengthSquared();
+			if (!_transparentBatches.TryGetValue(key, out TransparentBatch? batch))
+			{
+				batch = new TransparentBatch(mesh, material);
+				_transparentBatches.Add(key, batch);
+			}
+			batch.AddInstance(instance, distanceSquared);
+		}
+		else
+		{
+			if (!_drawBatches.TryGetValue(key, out DrawBatch? batch))
+			{
+				batch = new DrawBatch(mesh, material);
+				_drawBatches.Add(key, batch);
+			}
+			batch.AddInstance(instance, relativeCenter, worldRadius);
+		}
+	}
+
+	private void LogDrawCalls(FrameContext frame)
+	{
+		long currentTime = Environment.TickCount64;
+		if (currentTime - _lastDrawCallLogTime < 1000)
+			return;
+
+		_lastDrawCallLogTime = currentTime;
+
+		int totalDrawCalls =
+			frame.SkyDrawCalls + frame.OpaqueDrawCalls + frame.TransparentDrawCalls;
+
+		Console.WriteLine(
+			$"Draw calls: {totalDrawCalls} " +
+			$"(Sky: {frame.SkyDrawCalls}, Opaque: {frame.OpaqueDrawCalls}, " +
+			$"Transparent: {frame.TransparentDrawCalls}) | " +
+			$"Instances: {frame.TotalInstanceCount}");
+	}
+
+	private static FrameContext EmptyFrameContext() => new()
+	{
+		ViewProjection = Matrix4x4.Identity,
+		InverseViewProjection = Matrix4x4.Identity,
+		FrustumPlanes = [],
+		TotalInstanceCount = 0,
+		OpaqueInstanceCount = 0,
+		UseOcclusionCulling = false
+	};
 
 	private bool IsTransparent(Material material) =>
 	material.Opacity < 1.0 ||
