@@ -198,7 +198,12 @@ public sealed class UIRenderer : IDisposable
 		if (width <= 0 || height <= 0)
 			return false;
 
-		CollectElement(document.Root, width, height);
+		CollectElement(
+			document.Root,
+			0.0f,
+			0.0f,
+			width,
+			height);
 
 		if (_vertexCount == 0)
 			return false;
@@ -242,15 +247,27 @@ public sealed class UIRenderer : IDisposable
 	}
 
 	private void CollectElement(
-		VisualElement element,
-		int width,
-		int height)
+	VisualElement element,
+	float parentX,
+	float parentY,
+	int width,
+	int height)
 	{
 		if (!element.Visible)
 			return;
 
-		UIRect rect = element.Rect;
-		Vector4 backgroundColor = element.BackgroundColor;
+		UIRect localRect = element.Rect;
+
+		float originX = parentX + localRect.X;
+		float originY = parentY + localRect.Y;
+
+		UIMargin margin = element.Margin;
+
+		UIRect rect = new(
+			originX + margin.Left,
+			originY + margin.Top,
+			localRect.Width - margin.Left - margin.Right,
+			localRect.Height - margin.Top - margin.Bottom);
 
 		bool validRect =
 			float.IsFinite(rect.X) &&
@@ -259,6 +276,8 @@ public sealed class UIRenderer : IDisposable
 			float.IsFinite(rect.Height) &&
 			rect.Width > 0.0f &&
 			rect.Height > 0.0f;
+
+		Vector4 backgroundColor = element.BackgroundColor;
 
 		bool validBackground =
 			float.IsFinite(backgroundColor.X) &&
@@ -279,14 +298,22 @@ public sealed class UIRenderer : IDisposable
 				height);
 		}
 
-		if (element is UILabel label &&
+		if (validRect &&
+			element is UILabel label &&
 			!string.IsNullOrEmpty(label.Text))
 		{
-			AddText(label, width, height);
+			AddText(label, rect, width, height);
 		}
 
 		foreach (VisualElement child in element.Children)
-			CollectElement(child, width, height);
+		{
+			CollectElement(
+				child,
+				originX,
+				originY,
+				width,
+				height);
+		}
 	}
 
 	private void AddRectangle(
@@ -329,11 +356,12 @@ public sealed class UIRenderer : IDisposable
 
 	private void AddText(
 		UILabel label,
+		UIRect rect,
 		int width,
 		int height)
 	{
-		if (!float.IsFinite(label.Rect.X) ||
-			!float.IsFinite(label.Rect.Y))
+		if (!float.IsFinite(rect.X) ||
+			!float.IsFinite(rect.Y))
 		{
 			return;
 		}
@@ -363,9 +391,9 @@ public sealed class UIRenderer : IDisposable
 			Vector4.Zero,
 			Vector4.One);
 
-		float startX = label.Rect.X;
+		float startX = rect.X;
 		float penX = startX;
-		float penY = label.Rect.Y + atlas.AscentPixels;
+		float penY = rect.Y + atlas.AscentPixels;
 
 		DrawBatch batch = BeginBatch(atlas.ResourceSet);
 

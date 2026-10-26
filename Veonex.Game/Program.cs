@@ -8,6 +8,7 @@ using Veonex.Render;
 using Veonex.Assets;
 using Veonex.UI.Core;
 using Veonex.UI.Layout;
+using Veonex.UI.Controls;
 using System.Numerics;
 
 /// <summary>
@@ -40,12 +41,18 @@ try
 	UISystem ui = new();
 	UIDocument uiDocument = new("HUD");
 
-	uiDocument.Add(new VisualElement
+	UILabel counter = new(
+		"60 FPS",
+		"assets/fonts/Roboto-Regular.ttf",
+		12)
 	{
-		Name = "HUDPanel",
-		Rect = new UIRect(20, 20, 320, 90),
-		BackgroundColor = new Vector4(0.04f, 0.06f, 0.10f, 0.85f)
-	});
+		Name = "Counter",
+		Rect = new UIRect(0, 0, 296, 66),
+		Margin = UIMargin.All(6),
+		TextColor = Vector4.One
+	};
+
+	uiDocument.Add(counter);
 
 	Scene scene = new();
 
@@ -275,6 +282,10 @@ try
 
 	const double maxDeltaTime = 0.05;
 
+	double fpsTimer = 0.0;
+	int fpsFrames = 0;
+	int currentFps = 0;
+
 	while (!input.QuitRequested)
 	{
 		double currentTime =
@@ -287,6 +298,19 @@ try
 
 		double deltaTime =
 			Math.Min(realDeltaTime, maxDeltaTime);
+
+		fpsTimer += realDeltaTime;
+		fpsFrames++;
+
+		if (fpsTimer >= 1.0)
+		{
+			currentFps = (int)Math.Round(fpsFrames / fpsTimer);
+
+			counter.Text = $"{currentFps} FPS";
+
+			fpsTimer = 0.0;
+			fpsFrames = 0;
+		}
 
 		input.Update();
 

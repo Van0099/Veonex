@@ -15,6 +15,8 @@ public class VisualElement
 
 	public UIRect Rect { get; set; } = UIRect.Empty;
 
+	public UIMargin Margin { get; set; } = UIMargin.Zero;
+
 	public bool Visible { get; set; } = true;
 
 	public bool Enabled { get; set; } = true;
