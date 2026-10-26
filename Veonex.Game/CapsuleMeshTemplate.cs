@@ -1,5 +1,5 @@
-﻿// capsule mesh template
-
+﻿using System;
+using System.Collections.Generic;
 using Veonex.Mathematics;
 using Veonex.Core;
 
@@ -33,6 +33,13 @@ public static class CapsuleMeshTemplate
 
 		double halfHeight = height * 0.5;
 		double cylinderHalf = halfHeight - radius;
+		double cylinderHeight = cylinderHalf * 2.0;
+
+		double topCapLength = Math.PI * radius * 0.5;
+		double totalLength = Math.PI * radius + cylinderHeight;
+
+		int actualCylinderSegments =
+			cylinderHalf > 0.0 ? cylinderSegments : 0;
 
 		var positions = new List<DVector3>();
 		var normals = new List<DVector3>();
@@ -41,9 +48,12 @@ public static class CapsuleMeshTemplate
 
 		for (int ring = 0; ring <= ringsPerHemisphere; ring++)
 		{
-			double phi = (Math.PI * 0.5) * ring / ringsPerHemisphere;
+			double phi =
+				(Math.PI * 0.5) * ring / ringsPerHemisphere;
+
 			double sinPhi = Math.Sin(phi);
 			double cosPhi = Math.Cos(phi);
+			double v = radius * phi / totalLength;
 
 			for (int seg = 0; seg <= segments; seg++)
 			{
@@ -51,7 +61,6 @@ public static class CapsuleMeshTemplate
 				double sinTheta = Math.Sin(theta);
 				double cosTheta = Math.Cos(theta);
 
-				// Unit sphere point (normal).
 				var normal = new DVector3(
 					sinPhi * cosTheta,
 					cosPhi,
@@ -66,40 +75,15 @@ public static class CapsuleMeshTemplate
 
 				uvs.Add(new DVector2(
 					(double)seg / segments,
-					0.5 - (double)ring / (ringsPerHemisphere * 2.0) - 0.25));
+					v));
 			}
 		}
 
-		for (int cyl = 1; cyl <= cylinderSegments; cyl++)
+		for (int cyl = 1; cyl <= actualCylinderSegments; cyl++)
 		{
-			double t = (double)cyl / cylinderSegments;
-
-			for (int seg = 0; seg <= segments; seg++)
-			{
-				double theta = 2.0 * Math.PI * seg / segments;
-				double sinTheta = Math.Sin(theta);
-				double cosTheta = Math.Cos(theta);
-
-				var normal = new DVector3(cosTheta, 0.0, sinTheta);
-
-				positions.Add(new DVector3(
-					normal.X * radius,
-					cylinderHalf - t * (cylinderHalf * 2.0),
-					normal.Z * radius));
-
-				normals.Add(normal);
-
-				uvs.Add(new DVector2(
-					(double)seg / segments,
-					0.5 - t * 0.5));
-			}
-		}
-
-		for (int ring = 1; ring <= ringsPerHemisphere; ring++)
-		{
-			double phi = (Math.PI * 0.5) * ring / ringsPerHemisphere;
-			double sinPhi = Math.Sin(phi);
-			double cosPhi = Math.Cos(phi);
+			double t = (double)cyl / actualCylinderSegments;
+			double y = cylinderHalf - t * cylinderHeight;
+			double v = (topCapLength + t * cylinderHeight) / totalLength;
 
 			for (int seg = 0; seg <= segments; seg++)
 			{
@@ -108,9 +92,45 @@ public static class CapsuleMeshTemplate
 				double cosTheta = Math.Cos(theta);
 
 				var normal = new DVector3(
-					sinPhi * cosTheta,
-					-cosPhi,
-					sinPhi * sinTheta);
+					cosTheta,
+					0.0,
+					sinTheta);
+
+				positions.Add(new DVector3(
+					normal.X * radius,
+					y,
+					normal.Z * radius));
+
+				normals.Add(normal);
+
+				uvs.Add(new DVector2(
+					(double)seg / segments,
+					v));
+			}
+		}
+
+		for (int ring = 1; ring <= ringsPerHemisphere; ring++)
+		{
+			double alpha =
+				(Math.PI * 0.5) * ring / ringsPerHemisphere;
+
+			double sinAlpha = Math.Sin(alpha);
+			double cosAlpha = Math.Cos(alpha);
+
+			double v =
+				(topCapLength + cylinderHeight + radius * alpha)
+				/ totalLength;
+
+			for (int seg = 0; seg <= segments; seg++)
+			{
+				double theta = 2.0 * Math.PI * seg / segments;
+				double sinTheta = Math.Sin(theta);
+				double cosTheta = Math.Cos(theta);
+
+				var normal = new DVector3(
+					cosAlpha * cosTheta,
+					-sinAlpha,
+					cosAlpha * sinTheta);
 
 				positions.Add(new DVector3(
 					normal.X * radius,
@@ -121,16 +141,17 @@ public static class CapsuleMeshTemplate
 
 				uvs.Add(new DVector2(
 					(double)seg / segments,
-					0.0 - (double)ring / (ringsPerHemisphere * 2.0)));
+					v));
 			}
 		}
 
-		int ringCount = positions.Count / (segments + 1);
+		int rowSize = segments + 1;
+		int ringCount = positions.Count / rowSize;
 
 		for (int ring = 0; ring < ringCount - 1; ring++)
 		{
-			int rowStart = ring * (segments + 1);
-			int nextRowStart = (ring + 1) * (segments + 1);
+			int rowStart = ring * rowSize;
+			int nextRowStart = (ring + 1) * rowSize;
 
 			for (int seg = 0; seg < segments; seg++)
 			{

@@ -42,7 +42,7 @@ try
 
 	Light light = lightEntity.Add<Light>();
 	light.Type = LightType.Directional;
-	light.Color = new DVector3(0.5, 1.0, 1.0);
+	light.Color = new DVector3(1.0, 1.0, 1.0);
 	light.Intensity = 1.0;
 
 	physics.Gravity = new DVector3(0.0, -9.81, 0.0);
@@ -143,7 +143,7 @@ try
 	playerBody.UseGravity = true;
 	playerBody.FreezeRotation = true;
 
-	const int cubeCount = 100;
+	const int cubeCount = 50;
 	const int columnsPerAxis = 5;
 
 	const double cubeScale = 0.5;

@@ -18,8 +18,14 @@ layout(location = 7) in vec4 InstanceNormalRow0;
 layout(location = 8) in vec4 InstanceNormalRow1;
 layout(location = 9) in vec4 InstanceNormalRow2;
 
+layout(set = 2, binding = 3) uniform ShadowMatrixBuffer
+{
+    mat4 LightViewProjection;
+};
+
 layout(location = 0) out vec3 FragNormal;
 layout(location = 1) out vec2 FragUV;
+layout(location = 2) out vec4 FragShadowPosition;
 
 void main()
 {
@@ -29,7 +35,8 @@ void main()
         InstanceRow2,
         InstanceRow3);
 
-    gl_Position = ViewProjection * model * vec4(Position, 1.0);
+    vec4 worldPosition = model * vec4(Position, 1.0);
+    gl_Position = ViewProjection * worldPosition;
 
     mat3 normalMatrix = mat3(
         InstanceNormalRow0.xyz,
@@ -38,6 +45,7 @@ void main()
 
     FragNormal = normalize(normalMatrix * Normal);
     FragUV = UV;
+    FragShadowPosition = LightViewProjection * worldPosition;
 }
 
 ###FRAG
@@ -57,12 +65,44 @@ layout(set = 2, binding = 0) uniform LightingBuffer
 {
     vec4 LightDirection;
     vec4 LightColorIntensity;
+    vec4 ShadowParameters;
 };
+
+layout(set = 2, binding = 1) uniform texture2D ShadowMap;
+layout(set = 2, binding = 2) uniform sampler ShadowSampler;
 
 layout(location = 0) in vec3 FragNormal;
 layout(location = 1) in vec2 FragUV;
+layout(location = 2) in vec4 FragShadowPosition;
 
 layout(location = 0) out vec4 OutColor;
+
+float CalculateShadow(vec4 shadowPosition, vec3 normal, vec3 lightDirection)
+{
+    if (ShadowParameters.x < 0.5 || shadowPosition.w <= 0.0)
+        return 1.0;
+
+    vec3 projected = shadowPosition.xyz / shadowPosition.w;
+
+    if (projected.x < -1.0 || projected.x > 1.0 ||
+        projected.y < -1.0 || projected.y > 1.0 ||
+        projected.z < 0.0 || projected.z > 1.0)
+        return 1.0;
+
+    vec2 shadowUV = projected.xy * 0.5 + 0.5;
+
+    if (ShadowParameters.y > 0.5)
+        shadowUV.y = 1.0 - shadowUV.y;
+
+    float closestDepth = texture(
+        sampler2D(ShadowMap, ShadowSampler),
+        shadowUV).r;
+
+    float normalBias = 1.0 - max(dot(normal, lightDirection), 0.0);
+    float bias = max(ShadowParameters.z * normalBias, ShadowParameters.z * 0.2);
+
+    return projected.z - bias > closestDepth ? 0.0 : 1.0;
+}
 
 void main()
 {
@@ -73,12 +113,18 @@ void main()
         dot(normal, lightDirection),
         0.0);
 
+    float shadow = CalculateShadow(
+        FragShadowPosition,
+        normal,
+        lightDirection);
+
     vec3 lighting =
         vec3(0.2) +
         diffuse *
         0.8 *
         LightColorIntensity.rgb *
-        LightColorIntensity.a;
+        LightColorIntensity.a *
+        shadow;
 
     vec4 textureColor = texture(
         sampler2D(AlbedoTexture, AlbedoSampler),

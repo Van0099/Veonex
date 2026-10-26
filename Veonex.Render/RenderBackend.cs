@@ -1,4 +1,4 @@
-﻿using NeoVeldrid;
+using NeoVeldrid;
 using SDL;
 using System.Numerics;
 using System.Runtime.InteropServices;
@@ -36,12 +36,25 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly DeviceBuffer _skyBuffer;
 	private readonly ResourceSet _skyResourceSet;
 
+	private const int ShadowMapSize = 4096;
+	private const float MaximumShadowDistance = 80f;
+
 	private readonly Sampler _linearSampler;
+	private readonly Sampler _shadowSampler;
 	private readonly Texture _whiteTexture;
+	private readonly Texture? _shadowTexture;
+	private readonly TextureView _shadowTextureView;
+	private readonly Framebuffer? _shadowFramebuffer;
+	private bool _shadowMapSupported;
+	private Shader[]? _shadowShaders;
+	private Pipeline? _shadowPipeline;
 
 	private readonly ResourceLayout _cameraLayout;
 	private readonly DeviceBuffer _cameraBuffer;
 	private readonly ResourceSet _cameraResourceSet;
+	private readonly DeviceBuffer _shadowCameraBuffer;
+	private readonly ResourceSet _shadowCameraResourceSet;
+	private readonly DeviceBuffer _shadowMatrixBuffer;
 	private readonly ResourceLayout _materialLayout;
 
 	private readonly ResourceLayout _lightingLayout;
@@ -59,6 +72,11 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly Dictionary<BatchKey, DrawBatch> _drawBatches = [];
 	private readonly Dictionary<BatchKey, TransparentBatch> _transparentBatches = [];
 	private readonly List<TransparentBatch> _sortedTransparentBatches = [];
+	private readonly Dictionary<Guid, ShadowDrawBatch> _shadowBatches = [];
+
+	private DeviceBuffer? _shadowInstanceBuffer;
+	private int _shadowInstanceBufferCapacity;
+	private InstanceData[] _shadowInstanceUploadData = new InstanceData[1];
 
 	private DeviceBuffer? _instanceBuffer;
 	private int _instanceBufferCapacity;
@@ -122,8 +140,12 @@ public sealed unsafe class RenderBackend : IDisposable
 		public required bool UseOcclusionCulling;
 
 		public int SkyDrawCalls;
+		public int ShadowDrawCalls;
 		public int OpaqueDrawCalls;
 		public int TransparentDrawCalls;
+		public int ShadowInstanceCount;
+		public bool ShadowsEnabled;
+		public Matrix4x4 ShadowViewProjection = Matrix4x4.Identity;
 
 		public bool HasVisibleInstances => TotalInstanceCount > 0;
 	}
@@ -247,6 +269,43 @@ public sealed unsafe class RenderBackend : IDisposable
 			}
 		}
 	}
+
+	private sealed class ShadowDrawBatch
+	{
+		public Mesh Mesh { get; }
+		private InstanceData[] _instances = new InstanceData[4];
+		public int InstanceCount { get; private set; }
+		public int InstanceStart { get; set; }
+
+		public ShadowDrawBatch(Mesh mesh)
+		{
+			Mesh = mesh;
+		}
+
+		public void Reset()
+		{
+			InstanceCount = 0;
+			InstanceStart = 0;
+		}
+
+		public void AddInstance(InstanceData instance)
+		{
+			if (InstanceCount == _instances.Length)
+				Array.Resize(ref _instances, checked(_instances.Length * 2));
+			_instances[InstanceCount++] = instance;
+		}
+
+		public void CopyInstancesTo(InstanceData[] destination, int destinationStart)
+		{
+			Array.Copy(_instances, 0, destination, destinationStart, InstanceCount);
+		}
+	}
+
+	private readonly record struct DirectionalLightData(
+		bool Enabled,
+		Vector3 Direction,
+		Vector3 Color,
+		float Intensity);
 
 	private readonly struct TransparentInstance
 	{
@@ -393,14 +452,22 @@ public sealed unsafe class RenderBackend : IDisposable
 	{
 		public Vector4 LightDirection;
 		public Vector4 LightColorIntensity;
+		public Vector4 ShadowParameters;
 
 		public LightingBuffer(
 			Vector3 direction,
 			Vector3 color,
-			float intensity)
+			float intensity,
+			bool shadowsEnabled,
+			bool flipShadowY)
 		{
 			LightDirection = new Vector4(direction, 0.0f);
 			LightColorIntensity = new Vector4(color, intensity);
+			ShadowParameters = new Vector4(
+				shadowsEnabled ? 1f : 0f,
+				flipShadowY ? 1f : 0f,
+				0.0015f,
+				0f);
 		}
 	}
 
@@ -476,6 +543,19 @@ public sealed unsafe class RenderBackend : IDisposable
 				0,
 				SamplerBorderColor.TransparentBlack));
 
+		_shadowSampler = Factory.CreateSampler(
+			new SamplerDescription(
+				SamplerAddressMode.Clamp,
+				SamplerAddressMode.Clamp,
+				SamplerAddressMode.Clamp,
+				SamplerFilter.MinPoint_MagPoint_MipPoint,
+				null,
+				1,
+				0,
+				0,
+				0,
+				SamplerBorderColor.TransparentBlack));
+
 		_whiteTexture = Factory.CreateTexture(
 			TextureDescription.Texture2D(
 				1,
@@ -499,6 +579,12 @@ public sealed unsafe class RenderBackend : IDisposable
 			0,
 			0);
 
+		(Texture? texture, Framebuffer? framebuffer, bool supported) = CreateShadowTarget();
+		_shadowTexture = texture;
+		_shadowFramebuffer = framebuffer;
+		_shadowTextureView = Factory.CreateTextureView(_shadowTexture ?? _whiteTexture);
+		_shadowMapSupported = supported;
+
 		_commandList = Factory.CreateCommandList();
 
 		_cameraLayout = Factory.CreateResourceLayout(
@@ -517,6 +603,21 @@ public sealed unsafe class RenderBackend : IDisposable
 			new ResourceSetDescription(
 				_cameraLayout,
 				_cameraBuffer));
+
+		_shadowCameraBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)Marshal.SizeOf<CameraBuffer>(),
+				BufferUsage.UniformBuffer));
+
+		_shadowCameraResourceSet = Factory.CreateResourceSet(
+			new ResourceSetDescription(
+				_cameraLayout,
+				_shadowCameraBuffer));
+
+		_shadowMatrixBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)Marshal.SizeOf<CameraBuffer>(),
+				BufferUsage.UniformBuffer));
 
 		_materialLayout = Factory.CreateResourceLayout(
 			new ResourceLayoutDescription(
@@ -538,7 +639,19 @@ public sealed unsafe class RenderBackend : IDisposable
 				new ResourceLayoutElementDescription(
 					"LightingBuffer",
 					ResourceKind.UniformBuffer,
-					ShaderStages.Fragment)));
+					ShaderStages.Fragment),
+				new ResourceLayoutElementDescription(
+					"ShadowMap",
+					ResourceKind.TextureReadOnly,
+					ShaderStages.Fragment),
+				new ResourceLayoutElementDescription(
+					"ShadowSampler",
+					ResourceKind.Sampler,
+					ShaderStages.Fragment),
+				new ResourceLayoutElementDescription(
+					"ShadowMatrixBuffer",
+					ResourceKind.UniformBuffer,
+					ShaderStages.Vertex)));
 
 		_lightingBuffer = Factory.CreateBuffer(
 			new BufferDescription(
@@ -548,7 +661,10 @@ public sealed unsafe class RenderBackend : IDisposable
 		_lightingResourceSet = Factory.CreateResourceSet(
 			new ResourceSetDescription(
 				_lightingLayout,
-				_lightingBuffer));
+				_lightingBuffer,
+				_shadowTextureView,
+				_shadowSampler,
+				_shadowMatrixBuffer));
 
 		_skyLayout = Factory.CreateResourceLayout(
 			new ResourceLayoutDescription(
@@ -584,6 +700,33 @@ public sealed unsafe class RenderBackend : IDisposable
 		_pipeline = CreatePipeline(transparent: false);
 		_transparentPipeline = CreatePipeline(transparent: true);
 		_skyPipeline = CreateSkyPipeline();
+
+		if (_shadowMapSupported)
+		{
+			try
+			{
+				string shadowShaderPath = Path.Combine(
+					AppContext.BaseDirectory,
+					"Shaders",
+					"ShadowDepth.ves");
+				_shadowShaders = ShaderLoader.Load(Factory, shadowShaderPath);
+				_shadowPipeline = CreateShadowPipeline();
+				Console.WriteLine($"[Veonex] Directional shadow mapping enabled ({ShadowMapSize}x{ShadowMapSize}).");
+			}
+			catch (Exception ex)
+			{
+				_shadowMapSupported = false;
+				_shadowPipeline?.Dispose();
+				_shadowPipeline = null;
+				if (_shadowShaders != null)
+				{
+					foreach (Shader shader in _shadowShaders)
+						shader.Dispose();
+					_shadowShaders = null;
+				}
+				Console.Error.WriteLine($"[Veonex] Shadows disabled: {ex.Message}");
+			}
+		}
 
 		_occlusionCullingSupported =
 			_graphicsDevice.Features.ComputeShader &&
@@ -1027,6 +1170,90 @@ public sealed unsafe class RenderBackend : IDisposable
 			"Only 'x11' and 'wayland' are supported.");
 	}
 
+	private (Texture? Texture, Framebuffer? Framebuffer, bool Supported) CreateShadowTarget()
+	{
+		bool supported = _graphicsDevice.IsDepthRangeZeroToOne &&
+			_graphicsDevice.GetPixelFormatSupport(
+				PixelFormat.D32_Float_S8_UInt,
+				TextureType.Texture2D,
+				TextureUsage.DepthStencil | TextureUsage.Sampled);
+
+		if (!supported)
+			return (null, null, false);
+
+		Texture? texture = null;
+		Framebuffer? framebuffer = null;
+
+		try
+		{
+			Texture createdTexture = Factory.CreateTexture(
+				TextureDescription.Texture2D(
+					(uint)ShadowMapSize,
+					(uint)ShadowMapSize,
+					1,
+					1,
+					PixelFormat.D32_Float_S8_UInt,
+					TextureUsage.DepthStencil | TextureUsage.Sampled));
+			texture = createdTexture;
+			framebuffer = Factory.CreateFramebuffer(new FramebufferDescription(createdTexture));
+			return (texture, framebuffer, true);
+		}
+		catch (Exception ex)
+		{
+			framebuffer?.Dispose();
+			texture?.Dispose();
+			Console.Error.WriteLine($"[Veonex] Shadow target unavailable: {ex.Message}");
+			return (null, null, false);
+		}
+	}
+
+	private Pipeline CreateShadowPipeline()
+	{
+		VertexLayoutDescription positionLayout = new(
+			new VertexElementDescription(
+				"Position",
+				VertexElementSemantic.Position,
+				VertexElementFormat.Float3));
+
+		VertexLayoutDescription instanceLayout = new(
+			(uint)InstanceDataSize,
+			1,
+			new VertexElementDescription("InstanceRow0", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 0),
+			new VertexElementDescription("InstanceRow1", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 16),
+			new VertexElementDescription("InstanceRow2", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 32),
+			new VertexElementDescription("InstanceRow3", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 48),
+			new VertexElementDescription("InstanceNormalRow0", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 64),
+			new VertexElementDescription("InstanceNormalRow1", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 80),
+			new VertexElementDescription("InstanceNormalRow2", VertexElementSemantic.TextureCoordinate, VertexElementFormat.Float4, 96));
+
+		ShaderSetDescription shaderSet = new(
+			[positionLayout, instanceLayout],
+			_shadowShaders!);
+
+		RasterizerStateDescription rasterizer = new(
+			FaceCullMode.Back,
+			PolygonFillMode.Solid,
+			FrontFace.Clockwise,
+			depthClipEnabled: true,
+			scissorTestEnabled: false);
+
+		DepthStencilStateDescription depthState = new(
+			depthTestEnabled: true,
+			depthWriteEnabled: true,
+			comparisonKind: ComparisonKind.LessEqual);
+
+		GraphicsPipelineDescription description = new(
+			BlendStateDescription.Empty,
+			depthState,
+			rasterizer,
+			PrimitiveTopology.TriangleList,
+			shaderSet,
+			[_cameraLayout],
+			_shadowFramebuffer!.OutputDescription);
+
+		return Factory.CreateGraphicsPipeline(description);
+	}
+
 	private Pipeline CreatePipeline(bool transparent)
 	{
 		VertexLayoutDescription positionLayout = new(
@@ -1165,11 +1392,38 @@ public sealed unsafe class RenderBackend : IDisposable
 		if (!frame.HasVisibleInstances)
 			return;
 
-		UploadFrameBuffers(frame, time);
+		DirectionalLightData light = FindDirectionalLight(scene);
+		frame.ShadowsEnabled = _shadowMapSupported && light.Enabled && light.Intensity > 0f;
+		frame.ShadowViewProjection = Matrix4x4.Identity;
+		frame.ShadowInstanceCount = 0;
 
-		UpdateLighting(scene);
+		if (frame.ShadowsEnabled)
+		{
+			frame.ShadowViewProjection = CreateDirectionalShadowViewProjection(
+				camera,
+				(float)_renderWidth / _renderHeight,
+				light.Direction);
+
+			Transform cameraTransform = camera.Entity.Get<Transform>();
+			frame.ShadowInstanceCount = CollectShadowCasters(
+				scene,
+				cameraTransform.Position.X,
+				cameraTransform.Position.Y,
+				cameraTransform.Position.Z,
+				frame.ShadowViewProjection);
+		}
+		else
+		{
+			ResetShadowBatches();
+		}
+
+		UploadFrameBuffers(frame, time);
+		UpdateLighting(light, frame.ShadowsEnabled, frame.ShadowViewProjection);
 
 		_commandList.Begin();
+
+		if (frame.ShadowsEnabled)
+			RecordShadowPass(frame);
 
 		if (frame.UseOcclusionCulling)
 			RecordOcclusionCullingPass(frame);
@@ -1231,59 +1485,68 @@ public sealed unsafe class RenderBackend : IDisposable
 		};
 	}
 
-	private void UpdateLighting(Scene scene)
+	private DirectionalLightData FindDirectionalLight(Scene scene)
 	{
-		Vector3 direction = Vector3.UnitZ;
-		Vector3 color = Vector3.One;
-		float intensity = 0.0f;
-
 		foreach (Entity entity in scene.Entities)
 		{
-			if (!entity.Has<Light>())
+			if (!entity.Has<Light>() || !entity.Has<Transform>())
 				continue;
 
 			Light light = entity.Get<Light>();
-
-			if (!light.Enabled ||
-				light.Type != LightType.Directional ||
-				!entity.Has<Transform>())
-			{
+			if (!light.Enabled || light.Type != LightType.Directional)
 				continue;
-			}
 
 			DVector3 directionD = light.Direction;
-
-			direction = new Vector3(
+			Vector3 direction = new(
 				(float)directionD.X,
 				(float)directionD.Y,
 				(float)directionD.Z);
 
 			if (direction.LengthSquared() <= 0.000001f)
-			{
 				direction = Vector3.UnitZ;
-			}
 			else
-			{
 				direction = Vector3.Normalize(direction);
-			}
 
-			color = new Vector3(
+			Vector3 color = new(
 				(float)light.Color.X,
 				(float)light.Color.Y,
 				(float)light.Color.Z);
 
-			intensity = (float)light.Intensity;
-
-			break;
+			return new DirectionalLightData(
+				true,
+				direction,
+				color,
+				(float)light.Intensity);
 		}
 
+		return new DirectionalLightData(false, Vector3.UnitZ, Vector3.One, 0f);
+	}
+
+	private void UpdateLighting(
+		DirectionalLightData light,
+		bool shadowsEnabled,
+		Matrix4x4 shadowViewProjection)
+	{
 		_graphicsDevice.UpdateBuffer(
 			_lightingBuffer,
 			0,
 			new LightingBuffer(
-				direction,
-				color,
-				intensity));
+				light.Direction,
+				light.Color,
+				light.Intensity,
+				shadowsEnabled,
+				_graphicsDevice.IsClipSpaceYInverted !=
+				_graphicsDevice.IsUvOriginTopLeft));
+
+		_graphicsDevice.UpdateBuffer(
+			_shadowMatrixBuffer,
+			0,
+			new CameraBuffer(shadowViewProjection));
+
+		_graphicsDevice.UpdateBuffer(
+			_shadowCameraBuffer,
+			0,
+			new CameraBuffer(shadowViewProjection));
 	}
 
 	private void CollectVisibleInstances(
@@ -1312,6 +1575,207 @@ public sealed unsafe class RenderBackend : IDisposable
 			AddInstanceToBatch(key, mesh, material, instance, relativeCenter, worldRadius);
 		}
 	}
+
+	private int CollectShadowCasters(
+		Scene scene,
+		double cameraX,
+		double cameraY,
+		double cameraZ,
+		Matrix4x4 shadowViewProjection)
+	{
+		ResetShadowBatches();
+		FrustumPlane[] shadowPlanes = CreateFrustumPlanes(shadowViewProjection);
+
+		foreach (Entity entity in scene.Entities)
+		{
+			if (!TryGetRenderable(entity, out Mesh mesh, out Material material, out Transform transform))
+				continue;
+
+			if (IsTransparent(material))
+				continue;
+
+			InstanceData instance = CreateInstanceData(transform, cameraX, cameraY, cameraZ);
+			MeshBounds bounds = GetOrCreateMeshBounds(mesh);
+			Vector3 relativeCenter = Vector3.Transform(bounds.Center, instance.Model);
+			float worldRadius = ComputeWorldRadius(bounds, transform);
+
+			if (!IsSphereVisible(relativeCenter, worldRadius, shadowPlanes))
+				continue;
+
+			if (!_shadowBatches.TryGetValue(mesh.Id, out ShadowDrawBatch? batch))
+			{
+				batch = new ShadowDrawBatch(mesh);
+				_shadowBatches.Add(mesh.Id, batch);
+			}
+
+			batch.AddInstance(instance);
+		}
+
+		int total = 0;
+		foreach (ShadowDrawBatch batch in _shadowBatches.Values)
+			total = checked(total + batch.InstanceCount);
+
+		if (total == 0)
+			return 0;
+
+		EnsureShadowUploadCapacity(total);
+		int offset = 0;
+
+		foreach (ShadowDrawBatch batch in _shadowBatches.Values)
+		{
+			if (batch.InstanceCount == 0)
+				continue;
+
+			batch.InstanceStart = offset;
+			batch.CopyInstancesTo(_shadowInstanceUploadData, offset);
+			offset += batch.InstanceCount;
+		}
+
+		EnsureShadowInstanceBufferCapacity(total);
+		_graphicsDevice.UpdateBuffer(
+			_shadowInstanceBuffer!,
+			0,
+			ref _shadowInstanceUploadData[0],
+			checked((uint)(total * InstanceDataSize)));
+
+		return total;
+	}
+
+	private void ResetShadowBatches()
+	{
+		foreach (ShadowDrawBatch batch in _shadowBatches.Values)
+			batch.Reset();
+	}
+
+	private void EnsureShadowUploadCapacity(int requiredCount)
+	{
+		if (_shadowInstanceUploadData.Length >= requiredCount)
+			return;
+
+		int capacity = Math.Max(1, _shadowInstanceUploadData.Length);
+		while (capacity < requiredCount)
+		{
+			if (capacity > int.MaxValue / 2)
+			{
+				capacity = requiredCount;
+				break;
+			}
+			capacity *= 2;
+		}
+		Array.Resize(ref _shadowInstanceUploadData, capacity);
+	}
+
+	private void EnsureShadowInstanceBufferCapacity(int requiredCount)
+	{
+		if (_shadowInstanceBuffer != null && _shadowInstanceBufferCapacity >= requiredCount)
+			return;
+
+		int capacity = _shadowInstanceBufferCapacity == 0 ? 4096 : _shadowInstanceBufferCapacity;
+		while (capacity < requiredCount)
+		{
+			if (capacity > int.MaxValue / 2)
+			{
+				capacity = requiredCount;
+				break;
+			}
+			capacity *= 2;
+		}
+
+		DeviceBuffer newBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				checked((uint)(capacity * InstanceDataSize)),
+				BufferUsage.VertexBuffer));
+
+		_shadowInstanceBuffer?.Dispose();
+		_shadowInstanceBuffer = newBuffer;
+		_shadowInstanceBufferCapacity = capacity;
+	}
+
+	private static Matrix4x4 CreateDirectionalShadowViewProjection(
+		Camera camera,
+		float aspectRatio,
+		Vector3 lightDirection)
+	{
+		Transform cameraTransform = camera.Entity.Get<Transform>();
+		DQuaternion rotation = cameraTransform.Quaternion;
+
+		Vector3 forward = ToVector3(rotation * new DVector3(0.0, 0.0, 1.0));
+		Vector3 right = ToVector3(rotation * new DVector3(1.0, 0.0, 0.0));
+		Vector3 up = ToVector3(rotation * new DVector3(0.0, 1.0, 0.0));
+
+		float nearDistance = MathF.Max(0.1f, (float)camera.NearClip);
+		float shadowDistance = MathF.Max(
+			nearDistance + 1f,
+			MathF.Min((float)camera.FarClip, MaximumShadowDistance));
+		float tanHalfFov = MathF.Tan((float)(camera.FieldOfView * Math.PI / 360.0));
+		Vector3[] corners = new Vector3[8];
+		int index = 0;
+
+		foreach (float distance in new[] { nearDistance, shadowDistance })
+		{
+			float halfHeight = tanHalfFov * distance;
+			float halfWidth = halfHeight * aspectRatio;
+			Vector3 center = forward * distance;
+
+			corners[index++] = center - right * halfWidth - up * halfHeight;
+			corners[index++] = center - right * halfWidth + up * halfHeight;
+			corners[index++] = center + right * halfWidth - up * halfHeight;
+			corners[index++] = center + right * halfWidth + up * halfHeight;
+		}
+
+		Vector3 centerPoint = Vector3.Zero;
+		foreach (Vector3 corner in corners)
+			centerPoint += corner;
+		centerPoint /= corners.Length;
+
+		lightDirection = lightDirection.LengthSquared() > 0.000001f
+			? Vector3.Normalize(lightDirection)
+			: Vector3.UnitZ;
+
+		Vector3 lightUp = MathF.Abs(Vector3.Dot(lightDirection, Vector3.UnitY)) > 0.95f
+			? Vector3.UnitZ
+			: Vector3.UnitY;
+		Vector3 lightPosition = centerPoint - lightDirection * shadowDistance;
+		Matrix4x4 lightView = Matrix4x4.CreateLookAt(lightPosition, centerPoint, lightUp);
+
+		float minX = float.PositiveInfinity;
+		float maxX = float.NegativeInfinity;
+		float minY = float.PositiveInfinity;
+		float maxY = float.NegativeInfinity;
+		float minDepth = float.PositiveInfinity;
+		float maxDepth = float.NegativeInfinity;
+
+		foreach (Vector3 corner in corners)
+		{
+			Vector3 lightSpace = Vector3.Transform(corner, lightView);
+			minX = MathF.Min(minX, lightSpace.X);
+			maxX = MathF.Max(maxX, lightSpace.X);
+			minY = MathF.Min(minY, lightSpace.Y);
+			maxY = MathF.Max(maxY, lightSpace.Y);
+			float depth = -lightSpace.Z;
+			minDepth = MathF.Min(minDepth, depth);
+			maxDepth = MathF.Max(maxDepth, depth);
+		}
+
+		float padding = MathF.Max(shadowDistance * 0.05f, 1f);
+		float nearPlane = MathF.Max(0.1f, minDepth - shadowDistance);
+		float farPlane = MathF.Max(nearPlane + 1f, maxDepth + shadowDistance);
+
+		Matrix4x4 lightProjection = Matrix4x4.CreateOrthographicOffCenter(
+			minX - padding,
+			maxX + padding,
+			minY - padding,
+			maxY + padding,
+			nearPlane,
+			farPlane);
+
+		return lightView * lightProjection;
+	}
+
+	private static Vector3 ToVector3(DVector3 value) => new(
+		(float)value.X,
+		(float)value.Y,
+		(float)value.Z);
 
 	private static bool TryGetRenderable(
 	Entity entity,
@@ -1535,6 +1999,39 @@ public sealed unsafe class RenderBackend : IDisposable
 			(uint)((frame.OpaqueInstanceCount + 63) / 64), 1, 1);
 	}
 
+	private void RecordShadowPass(FrameContext frame)
+	{
+		if (!_shadowMapSupported || _shadowFramebuffer == null || _shadowPipeline == null)
+			return;
+
+		_commandList.SetFramebuffer(_shadowFramebuffer);
+		_commandList.SetFullViewports();
+		_commandList.ClearDepthStencil(1.0f);
+		_commandList.SetPipeline(_shadowPipeline);
+		_commandList.SetGraphicsResourceSet(0, _shadowCameraResourceSet);
+
+		foreach (ShadowDrawBatch batch in _shadowBatches.Values)
+		{
+			if (batch.InstanceCount == 0)
+				continue;
+
+			MeshBuffer meshBuffer = GetOrCreateMeshBuffer(batch.Mesh);
+			_commandList.SetVertexBuffer(0, meshBuffer.PositionBuffer);
+			_commandList.SetVertexBuffer(
+				1,
+				_shadowInstanceBuffer!,
+				checked((uint)(batch.InstanceStart * InstanceDataSize)));
+			_commandList.SetIndexBuffer(meshBuffer.IndexBuffer, IndexFormat.UInt32);
+			_commandList.DrawIndexed(
+				meshBuffer.IndexCount,
+				(uint)batch.InstanceCount,
+				0,
+				0,
+				0);
+			frame.ShadowDrawCalls++;
+		}
+	}
+
 	private void RecordMainPass(FrameContext frame)
 	{
 		_commandList.SetFramebuffer(_graphicsDevice.SwapchainFramebuffer);
@@ -1605,6 +2102,7 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_commandList.SetPipeline(_transparentPipeline);
 		_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
+		_commandList.SetGraphicsResourceSet(2, _lightingResourceSet);
 
 		foreach (TransparentBatch batch in _sortedTransparentBatches)
 		{
@@ -1713,14 +2211,14 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_lastDrawCallLogTime = currentTime;
 
-		int totalDrawCalls =
-			frame.SkyDrawCalls + frame.OpaqueDrawCalls + frame.TransparentDrawCalls;
+		int totalDrawCalls = frame.SkyDrawCalls + frame.ShadowDrawCalls +
+			frame.OpaqueDrawCalls + frame.TransparentDrawCalls;
 
 		Console.WriteLine(
 			$"Draw calls: {totalDrawCalls} " +
-			$"(Sky: {frame.SkyDrawCalls}, Opaque: {frame.OpaqueDrawCalls}, " +
-			$"Transparent: {frame.TransparentDrawCalls}) | " +
-			$"Instances: {frame.TotalInstanceCount}");
+			$"(Sky: {frame.SkyDrawCalls}, Shadows: {frame.ShadowDrawCalls}, " +
+			$"Opaque: {frame.OpaqueDrawCalls}, Transparent: {frame.TransparentDrawCalls}) | " +
+			$"Instances: {frame.TotalInstanceCount}, Shadow instances: {frame.ShadowInstanceCount}");
 	}
 
 	private static FrameContext EmptyFrameContext() => new()
@@ -1730,7 +2228,10 @@ public sealed unsafe class RenderBackend : IDisposable
 		FrustumPlanes = [],
 		TotalInstanceCount = 0,
 		OpaqueInstanceCount = 0,
-		UseOcclusionCulling = false
+		UseOcclusionCulling = false,
+		ShadowsEnabled = false,
+		ShadowViewProjection = Matrix4x4.Identity,
+		ShadowInstanceCount = 0
 	};
 
 	private bool IsTransparent(Material material) =>
@@ -2276,10 +2777,24 @@ public sealed unsafe class RenderBackend : IDisposable
 		_disposed = true;
 
 		_commandList.Dispose();
+		_lightingResourceSet.Dispose();
 
 		_pipeline.Dispose();
 		_transparentPipeline.Dispose();
 		_skyPipeline.Dispose();
+		_shadowPipeline?.Dispose();
+		if (_shadowShaders != null)
+		{
+			foreach (Shader shader in _shadowShaders)
+				shader.Dispose();
+		}
+		_shadowFramebuffer?.Dispose();
+		_shadowTextureView.Dispose();
+		_shadowTexture?.Dispose();
+		_shadowInstanceBuffer?.Dispose();
+		_shadowInstanceBuffer = null;
+		_shadowInstanceUploadData = Array.Empty<InstanceData>();
+		_shadowBatches.Clear();
 
 		DisposeOcclusionResources();
 
@@ -2318,16 +2833,19 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_cameraResourceSet.Dispose();
 		_cameraBuffer.Dispose();
+		_shadowCameraResourceSet.Dispose();
+		_shadowCameraBuffer.Dispose();
+		_shadowMatrixBuffer.Dispose();
 		_cameraLayout.Dispose();
 
 		_materialLayout.Dispose();
 
-		_lightingResourceSet.Dispose();
 		_lightingBuffer.Dispose();
 		_lightingLayout.Dispose();
 
 		_whiteTexture.Dispose();
 		_linearSampler.Dispose();
+		_shadowSampler.Dispose();
 
 		_skyResourceSet.Dispose();
 		_skyBuffer.Dispose();
