@@ -12,11 +12,13 @@
     <PackageReference Include="NeoVeldrid.SPIRV" Version="1.2.1" />
     <PackageReference Include="ppy.SDL3-CS" Version="2026.722.0" />
     <PackageReference Include="StbImageSharp" Version="2.30.16" />
+    <PackageReference Include="StbTrueTypeSharp" Version="1.26.13" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Veonex.Assets\Veonex.Assets.csproj" />
     <ProjectReference Include="..\Veonex.Core\Veonex.Core.csproj" />
+	<ProjectReference Include="..\Veonex.UI\Veonex.UI.csproj" />
   </ItemGroup>
 
 	<ItemGroup>

@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Veonex.Core;
 using Veonex.Mathematics;
+using Veonex.UI.Core;
 
 namespace Veonex.Render;
 
@@ -112,6 +113,8 @@ public sealed unsafe class RenderBackend : IDisposable
 	private ResourceSet[] _hiZDownsampleResourceSets = [];
 	private int _occlusionTextureWidth;
 	private int _occlusionTextureHeight;
+
+	private readonly UIRenderer _uiRenderer;
 
 	private int _renderWidth;
 	private int _renderHeight;
@@ -700,6 +703,11 @@ public sealed unsafe class RenderBackend : IDisposable
 		_pipeline = CreatePipeline(transparent: false);
 		_transparentPipeline = CreatePipeline(transparent: true);
 		_skyPipeline = CreateSkyPipeline();
+
+		_uiRenderer = new UIRenderer(
+			Factory,
+			_graphicsDevice,
+			_graphicsDevice.SwapchainFramebuffer.OutputDescription);
 
 		if (_shadowMapSupported)
 		{
@@ -1382,18 +1390,28 @@ public sealed unsafe class RenderBackend : IDisposable
 		return Factory.CreateGraphicsPipeline(description);
 	}
 
-	public void RenderFrame(Scene scene, Camera camera, double time)
+	public void RenderFrame(Scene scene, Camera camera, double time, UIDocument? uiDocument = null)
 	{
 		if (_renderWidth <= 0 || _renderHeight <= 0)
 			return;
 
 		FrameContext frame = PrepareFrameContext(scene, camera, time);
 
-		if (!frame.HasVisibleInstances)
+		bool hasUI = uiDocument is not null &&
+			_uiRenderer.Prepare(
+				uiDocument,
+				_renderWidth,
+				_renderHeight);
+
+		if (!frame.HasVisibleInstances && !hasUI)
 			return;
 
 		DirectionalLightData light = FindDirectionalLight(scene);
-		frame.ShadowsEnabled = _shadowMapSupported && light.Enabled && light.Intensity > 0f;
+		frame.ShadowsEnabled =
+			_shadowMapSupported &&
+			frame.HasVisibleInstances &&
+			light.Enabled &&
+			light.Intensity > 0f;
 		frame.ShadowViewProjection = Matrix4x4.Identity;
 		frame.ShadowInstanceCount = 0;
 
@@ -1428,7 +1446,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		if (frame.UseOcclusionCulling)
 			RecordOcclusionCullingPass(frame);
 
-		RecordMainPass(frame);
+		RecordMainPass(frame, hasUI);
 
 		_commandList.End();
 
@@ -1885,13 +1903,16 @@ public sealed unsafe class RenderBackend : IDisposable
 
 	private void UploadFrameBuffers(FrameContext frame, double time)
 	{
-		EnsureInstanceBufferCapacity(_instanceUploadData.Length);
+		if (frame.TotalInstanceCount > 0)
+		{
+			EnsureInstanceBufferCapacity(_instanceUploadData.Length);
 
-		_graphicsDevice.UpdateBuffer(
-			_instanceBuffer!,
-			0,
-			ref _instanceUploadData[0],
-			checked((uint)(frame.TotalInstanceCount * InstanceDataSize)));
+			_graphicsDevice.UpdateBuffer(
+				_instanceBuffer!,
+				0,
+				ref _instanceUploadData[0],
+				checked((uint)(frame.TotalInstanceCount * InstanceDataSize)));
+		}
 
 		if (frame.UseOcclusionCulling)
 		{
@@ -2032,7 +2053,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		}
 	}
 
-	private void RecordMainPass(FrameContext frame)
+	private void RecordMainPass(FrameContext frame, bool renderUI)
 	{
 		_commandList.SetFramebuffer(_graphicsDevice.SwapchainFramebuffer);
 		_commandList.SetFullViewports();
@@ -2042,6 +2063,11 @@ public sealed unsafe class RenderBackend : IDisposable
 		RecordSkyPass(frame);
 		RecordOpaquePass(frame);
 		RecordTransparentPass(frame);
+
+		if (renderUI)
+		{
+			_uiRenderer.Record(_commandList);
+		}
 	}
 
 	private void RecordSkyPass(FrameContext frame)
@@ -2850,6 +2876,8 @@ public sealed unsafe class RenderBackend : IDisposable
 		_skyResourceSet.Dispose();
 		_skyBuffer.Dispose();
 		_skyLayout.Dispose();
+
+		_uiRenderer.Dispose();
 
 		_graphicsDevice.Dispose();
 

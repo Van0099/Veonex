@@ -6,6 +6,9 @@ using Veonex.Mathematics;
 using Veonex.Physics;
 using Veonex.Render;
 using Veonex.Assets;
+using Veonex.UI.Core;
+using Veonex.UI.Layout;
+using System.Numerics;
 
 /// <summary>
 /// Physics sandbox: a physics-driven first-person player, a floor,
@@ -33,6 +36,17 @@ try
 	using var physics = new Physics();
 
 	InputManager input = new();
+
+	UISystem ui = new();
+	UIDocument uiDocument = new("HUD");
+
+	uiDocument.Add(new VisualElement
+	{
+		Name = "HUDPanel",
+		Rect = new UIRect(20, 20, 320, 90),
+		BackgroundColor = new Vector4(0.04f, 0.06f, 0.10f, 0.85f)
+	});
+
 	Scene scene = new();
 
 	Entity lightEntity = scene.Add("DirectionalLight");
@@ -279,6 +293,8 @@ try
 		if (input.QuitRequested)
 			break;
 
+		ui.Update(uiDocument, deltaTime);
+
 		playerController.UpdateInput(deltaTime);
 
 		if (input.WindowSizeChanged)
@@ -307,7 +323,7 @@ try
 
 		playerController.UpdateCamera();
 
-		renderer.RenderFrame(scene, camera, currentTime);
+		renderer.RenderFrame(scene, camera, currentTime, uiDocument);
 	}
 
 	stopwatch.Stop();
