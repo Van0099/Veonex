@@ -44,6 +44,11 @@ public sealed class PhysicsPlayerController
 	private readonly RenderBackend _renderer;
 	private readonly Veonex.Physics.Physics _physics;
 
+	private const double ThirdPersonDistance = 4.0;
+	private const double ThirdPersonHeightOffset = 0.15;
+	private const double MinThirdPersonDistance = 0.5;
+	private const double MaxThirdPersonDistance = 20.0;
+
 	private readonly double _moveSpeed;
 	private readonly double _jumpSpeed;
 	private readonly double _mouseSensitivity;
@@ -56,6 +61,9 @@ public sealed class PhysicsPlayerController
 	private double _pitch;
 	private double _targetYaw;
 	private double _targetPitch;
+
+	private double _cameraDistance = ThirdPersonDistance;
+	private double _shoulderOffset = 0.0;
 
 	private double _jumpBufferTimer;
 	private double _coyoteTimer;
@@ -200,6 +208,9 @@ public sealed class PhysicsPlayerController
 		_mouseSensitivity = mouseSensitivity;
 		_eyeHeight = eyeHeight;
 
+		_cameraDistance = ThirdPersonDistance;
+		_shoulderOffset = 0.0;
+
 		_baseFieldOfView = camera.FieldOfView;
 
 		AutoBunnyHop = autoBunnyHop;
@@ -339,8 +350,7 @@ public sealed class PhysicsPlayerController
 
 		// Do not treat the player as grounded while they are already
 		// moving upwards. This helps prevent repeated jumps on one landing.
-		bool grounded = _physics.IsGrounded(_player) &&
-						currentVelocity.Y <= 0.05;
+		bool grounded = true;
 
 		if (grounded)
 		{
@@ -604,13 +614,35 @@ public sealed class PhysicsPlayerController
 
 	private void UpdateCameraTransform()
 	{
-		_cameraTransform.Position = _playerTransform.Position +
-			new DVector3(0.0, _eyeHeight, 0.0);
+		DVector3 eye = _playerTransform.Position +
+			new DVector3(0.0, _eyeHeight + ThirdPersonHeightOffset, 0.0);
 
-		_cameraTransform.Rotation = new DVector3(
-			_pitch,
-			_yaw,
-			0.0);
+		double yawRad = _yaw * Math.PI / 180.0;
+		double pitchRad = _pitch * Math.PI / 180.0;
+
+		DVector3 lookDirection = new(
+			Math.Sin(yawRad) * Math.Cos(pitchRad),
+			-Math.Sin(pitchRad),
+			Math.Cos(yawRad) * Math.Cos(pitchRad));
+
+		DVector3 forward = new(
+			Math.Sin(yawRad),
+			0.0,
+			Math.Cos(yawRad));
+
+		DVector3 right = new(
+			Math.Cos(yawRad),
+			0.0,
+			-Math.Sin(yawRad));
+
+		DVector3 cameraPosition =
+			eye -
+			lookDirection * _cameraDistance +
+			right * _shoulderOffset;
+
+		_cameraTransform.Position = cameraPosition;
+
+		_cameraTransform.Rotation = new DVector3(_pitch, _yaw, 0.0);
 	}
 
 	private static double NormalizeAngle(double angle)

@@ -97,21 +97,27 @@ try
 
 	Entity playerEntity = scene.Add("Player");
 
-	Transform playerTransform =
-		playerEntity.Add<Transform>();
+	Transform playerTransform = playerEntity.Add<Transform>();
+	playerTransform.Position = new DVector3(0.0, 1.05, 11.0);
 
-	playerTransform.Position =
-		new DVector3(0.0, 1.05, 11.0);
+	playerTransform.Scale = new DVector3(0.7, 0.9, 0.7);
 
-	playerTransform.Scale =
-		new DVector3(0.35, 0.9, 0.35);
+	Mesh capsuleMesh = CapsuleMeshTemplate.Create(
+		radius: 0.5,
+		height: 2.0,
+		segments: 24,
+		ringsPerHemisphere: 8,
+		cylinderSegments: 1);
 
-	MeshRenderer playerRenderer =
-		playerEntity.Add<MeshRenderer>();
+	Material playerMaterial = new Material(
+									"WhiteMat",
+									"Basic",
+									new DVector4(1, 1, 1, 1));
 
-	playerRenderer.Mesh = cubeMesh;
-	playerRenderer.Material = cubeMaterials[0];
-	playerRenderer.Visible = false;
+	MeshRenderer playerRenderer = playerEntity.Add<MeshRenderer>();
+	playerRenderer.Mesh = capsuleMesh;
+	playerRenderer.Material = playerMaterial;
+	playerRenderer.Visible = true;
 
 	Collider playerCollider =
 		playerEntity.Add<Collider>();
@@ -185,7 +191,7 @@ try
 			cubeEntity.Add<Collider>();
 
 		cubeCollider.SimpleGeometry = false;
-		cubeCollider.CollisionQuality = 1;
+		cubeCollider.CollisionQuality = 0.1;
 
 		PhysicsBody cubeBody =
 			cubeEntity.Add<PhysicsBody>();
