@@ -1,15 +1,17 @@
 ﻿using SDL;
+using System.Numerics;
+using Veonex.Assets;
 using Veonex.Core;
+using Veonex.Core.Logging;
 using Veonex.Game;
 using Veonex.Input;
 using Veonex.Mathematics;
 using Veonex.Physics;
 using Veonex.Render;
-using Veonex.Assets;
+using Veonex.UI.Controls;
 using Veonex.UI.Core;
 using Veonex.UI.Layout;
-using Veonex.UI.Controls;
-using System.Numerics;
+using Veonex.Core.Logging;
 
 /// <summary>
 /// Physics sandbox: a physics-driven first-person player, a floor,
@@ -41,18 +43,55 @@ try
 	UISystem ui = new();
 	UIDocument uiDocument = new("HUD");
 
+	Element topHud = new()
+	{
+		Name = "TopHud",
+		Size = new Vector2(912, 90),
+		Padding = UIMargin.All(6),
+		ChildrenLayout = UIChildrenLayout.Vertical,
+		ChildSpacing = 6,
+		BackgroundColor = Vector4.Zero
+	};
+
 	UILabel counter = new(
 		"60 FPS",
 		"assets/fonts/Roboto-Regular.ttf",
 		12)
 	{
 		Name = "Counter",
-		Rect = new UIRect(0, 0, 296, 66),
-		Margin = UIMargin.All(6),
+		Size = new Vector2(296, 24),
 		TextColor = Vector4.One
 	};
 
-	uiDocument.Add(counter);
+	UILabel renderStatsLabel = new(
+		"",
+		"assets/fonts/Roboto-Regular.ttf",
+		12)
+	{
+		Name = "RenderStats",
+		Size = new Vector2(900, 48),
+		TextColor = Vector4.One
+	};
+
+	UILabel consoleLabel = new(
+		"Veonex Console",
+		"assets/fonts/Roboto-Regular.ttf",
+		12)
+	{
+		Name = "Console",
+		Position = Vector2.Zero,
+		Size = new Vector2(600, 300),
+		Margin = UIMargin.All(6),
+		HorizontalAlignment = UIHorizontalAlignment.Left,
+		VerticalAlignment = UIVerticalAlignment.Bottom,
+		TextColor = Vector4.One
+	};
+
+	topHud.Add(counter);
+	topHud.Add(renderStatsLabel);
+
+	uiDocument.Add(topHud);
+	uiDocument.Add(consoleLabel);
 
 	Scene scene = new();
 
@@ -286,6 +325,9 @@ try
 	int fpsFrames = 0;
 	int currentFps = 0;
 
+	List<string> consoleLines = [];
+	const int MaxConsoleLines = 32;
+
 	while (!input.QuitRequested)
 	{
 		double currentTime =
@@ -312,12 +354,50 @@ try
 			fpsFrames = 0;
 		}
 
+		foreach (LogEntry entry in Logger.DrainPending())
+		{
+			if (entry.Category == "RenderStats")
+			{
+				renderStatsLabel.Text = entry.Message;
+				continue;
+			}
+
+			string line =
+				$"[{entry.Timestamp:HH:mm:ss}] " +
+				$"[{entry.Level}] " +
+				$"[{entry.Category}] " +
+				entry.Message;
+
+			if (entry.Exception is not null)
+				line += $"\n{entry.Exception}";
+
+			consoleLines.Add(line);
+
+			if (consoleLines.Count > MaxConsoleLines)
+				consoleLines.RemoveAt(0);
+		}
+
+		consoleLabel.Text = consoleLines.Count == 0
+			? "Veonex Console"
+			: string.Join("\n", consoleLines);
+
+		consoleLabel.Text = consoleLines.Count == 0
+			? "Veonex Console"
+			: string.Join("\n", consoleLines);
+
 		input.Update();
 
 		if (input.QuitRequested)
 			break;
 
-		ui.Update(uiDocument, deltaTime);
+		ui.Update(
+			uiDocument,
+			deltaTime,
+			new UIRect(
+				0,
+				0,
+				input.WindowWidth,
+				input.WindowHeight));
 
 		playerController.UpdateInput(deltaTime);
 

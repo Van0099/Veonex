@@ -1,10 +1,12 @@
-﻿namespace Veonex.UI.Core;
+﻿using Veonex.UI.Layout;
+
+namespace Veonex.UI.Core;
 
 public sealed class UIDocument
 {
 	public string Name { get; set; }
 
-	public VisualElement Root { get; }
+	public Element Root { get; }
 
 	public UIDocument(string name = "UIDocument")
 	{
@@ -12,18 +14,18 @@ public sealed class UIDocument
 
 		Name = name;
 
-		Root = new VisualElement
+		Root = new Element
 		{
 			Name = "Root"
 		};
 	}
 
-	public void Add(VisualElement element)
+	public void Add(Element element)
 	{
 		Root.Add(element);
 	}
 
-	public bool Remove(VisualElement element)
+	public bool Remove(Element element)
 	{
 		return Root.Remove(element);
 	}
@@ -31,6 +33,19 @@ public sealed class UIDocument
 	public void Clear()
 	{
 		Root.Clear();
+	}
+
+	public void ResolveLayout(int width, int height)
+	{
+		if (width < 0)
+			throw new ArgumentOutOfRangeException(nameof(width));
+
+		if (height < 0)
+			throw new ArgumentOutOfRangeException(nameof(height));
+
+		UILayoutResolver.Resolve(
+			Root,
+			new UIRect(0, 0, width, height));
 	}
 
 	internal void Update(double deltaTime)

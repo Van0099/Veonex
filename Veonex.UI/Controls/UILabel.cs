@@ -3,7 +3,7 @@ using Veonex.UI.Core;
 
 namespace Veonex.UI.Controls;
 
-public sealed class UILabel : VisualElement
+public sealed class UILabel : Element
 {
 	public string Text { get; set; } = string.Empty;
 

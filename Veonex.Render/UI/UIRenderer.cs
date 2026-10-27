@@ -198,10 +198,10 @@ public sealed class UIRenderer : IDisposable
 		if (width <= 0 || height <= 0)
 			return false;
 
+		document.ResolveLayout(width, height);
+
 		CollectElement(
 			document.Root,
-			0.0f,
-			0.0f,
 			width,
 			height);
 
@@ -247,27 +247,14 @@ public sealed class UIRenderer : IDisposable
 	}
 
 	private void CollectElement(
-	VisualElement element,
-	float parentX,
-	float parentY,
+	Element element,
 	int width,
 	int height)
 	{
 		if (!element.Visible)
 			return;
 
-		UIRect localRect = element.Rect;
-
-		float originX = parentX + localRect.X;
-		float originY = parentY + localRect.Y;
-
-		UIMargin margin = element.Margin;
-
-		UIRect rect = new(
-			originX + margin.Left,
-			originY + margin.Top,
-			localRect.Width - margin.Left - margin.Right,
-			localRect.Height - margin.Top - margin.Bottom);
+		UIRect rect = element.LayoutRect;
 
 		bool validRect =
 			float.IsFinite(rect.X) &&
@@ -302,18 +289,30 @@ public sealed class UIRenderer : IDisposable
 			element is UILabel label &&
 			!string.IsNullOrEmpty(label.Text))
 		{
-			AddText(label, rect, width, height);
+			UIMargin padding = element.Padding;
+
+			UIRect textRect = new(
+				rect.X + padding.Left,
+				rect.Y + padding.Top,
+				MathF.Max(
+					0.0f,
+					rect.Width - padding.Left - padding.Right),
+				MathF.Max(
+					0.0f,
+					rect.Height - padding.Top - padding.Bottom));
+
+			if (textRect.Width > 0.0f && textRect.Height > 0.0f)
+			{
+				AddText(
+					label,
+					textRect,
+					width,
+					height);
+			}
 		}
 
-		foreach (VisualElement child in element.Children)
-		{
-			CollectElement(
-				child,
-				originX,
-				originY,
-				width,
-				height);
-		}
+		foreach (Element child in element.Children)
+			CollectElement(child, width, height);
 	}
 
 	private void AddRectangle(

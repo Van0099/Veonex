@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using Veonex.Core;
 using Veonex.Mathematics;
 using Veonex.UI.Core;
+using Veonex.Core.Logging;
 
 namespace Veonex.Render;
 
@@ -719,7 +720,9 @@ public sealed unsafe class RenderBackend : IDisposable
 					"ShadowDepth.ves");
 				_shadowShaders = ShaderLoader.Load(Factory, shadowShaderPath);
 				_shadowPipeline = CreateShadowPipeline();
-				Console.WriteLine($"[Veonex] Directional shadow mapping enabled ({ShadowMapSize}x{ShadowMapSize}).");
+				Logger.Info(
+					"Shadows",
+					$"Directional shadow mapping enabled ({ShadowMapSize}x{ShadowMapSize}).");
 			}
 			catch (Exception ex)
 			{
@@ -732,7 +735,10 @@ public sealed unsafe class RenderBackend : IDisposable
 						shader.Dispose();
 					_shadowShaders = null;
 				}
-				Console.Error.WriteLine($"[Veonex] Shadows disabled: {ex.Message}");
+				Logger.Warning(
+					"Shadows",
+					$"Shadows disabled: {ex.Message}",
+					ex);
 			}
 		}
 
@@ -756,15 +762,18 @@ public sealed unsafe class RenderBackend : IDisposable
 			try
 			{
 				InitializeOcclusionCulling();
-				Console.WriteLine(
-					"[Veonex] GPU Hi-Z occlusion culling enabled (64+ opaque instances).");
+				Logger.Info(
+					"Occlusion",
+					"GPU Hi-Z occlusion culling enabled (64+ opaque instances).");
 			}
 			catch (Exception ex)
 			{
 				DisposeOcclusionResources();
 				_occlusionCullingSupported = false;
-				Console.Error.WriteLine(
-					$"[Veonex] Hi-Z occlusion culling disabled: {ex.Message}");
+				Logger.Warning(
+					"Occlusion",
+					$"Hi-Z occlusion culling disabled: {ex.Message}",
+					ex);
 			}
 		}
 	}
@@ -1210,7 +1219,10 @@ public sealed unsafe class RenderBackend : IDisposable
 		{
 			framebuffer?.Dispose();
 			texture?.Dispose();
-			Console.Error.WriteLine($"[Veonex] Shadow target unavailable: {ex.Message}");
+			Logger.Warning(
+				"Shadows",
+				$"Shadow target unavailable: {ex.Message}",
+				ex);
 			return (null, null, false);
 		}
 	}
@@ -2240,7 +2252,8 @@ public sealed unsafe class RenderBackend : IDisposable
 		int totalDrawCalls = frame.SkyDrawCalls + frame.ShadowDrawCalls +
 			frame.OpaqueDrawCalls + frame.TransparentDrawCalls;
 
-		Console.WriteLine(
+		Logger.Debug(
+			"RenderStats",
 			$"Draw calls: {totalDrawCalls} " +
 			$"(Sky: {frame.SkyDrawCalls}, Shadows: {frame.ShadowDrawCalls}, " +
 			$"Opaque: {frame.OpaqueDrawCalls}, Transparent: {frame.TransparentDrawCalls}) | " +
