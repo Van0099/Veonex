@@ -5,6 +5,7 @@ using Veonex.Assets;
 using Veonex.UI.Controls;
 using Veonex.UI.Core;
 using Veonex.UI.Layout;
+using Veonex.UI.Styles;
 
 namespace Veonex.Render;
 
@@ -247,9 +248,9 @@ public sealed class UIRenderer : IDisposable
 	}
 
 	private void CollectElement(
-	Element element,
-	int width,
-	int height)
+		Element element,
+		int width,
+		int height)
 	{
 		if (!element.Visible)
 			return;
@@ -264,7 +265,11 @@ public sealed class UIRenderer : IDisposable
 			rect.Width > 0.0f &&
 			rect.Height > 0.0f;
 
-		Vector4 backgroundColor = element.BackgroundColor;
+		UIStyle style = element.Style;
+		float opacity = NormalizeOpacity(style.Opacity);
+
+		Vector4 backgroundColor = style.Background;
+		backgroundColor.W *= opacity;
 
 		bool validBackground =
 			float.IsFinite(backgroundColor.X) &&
@@ -307,12 +312,20 @@ public sealed class UIRenderer : IDisposable
 					label,
 					textRect,
 					width,
-					height);
+					height,
+					opacity);
 			}
 		}
 
 		foreach (Element child in element.Children)
 			CollectElement(child, width, height);
+	}
+
+	private static float NormalizeOpacity(float opacity)
+	{
+		return float.IsFinite(opacity)
+			? Math.Clamp(opacity, 0.0f, 1.0f)
+			: 1.0f;
 	}
 
 	private void AddRectangle(
@@ -324,16 +337,19 @@ public sealed class UIRenderer : IDisposable
 		DrawBatch batch = BeginBatch(_whiteResourceSet);
 
 		Vector2 topLeft = ToScreen(rect.X, rect.Y, width, height);
+
 		Vector2 topRight = ToScreen(
 			rect.X + rect.Width,
 			rect.Y,
 			width,
 			height);
+
 		Vector2 bottomLeft = ToScreen(
 			rect.X,
 			rect.Y + rect.Height,
 			width,
 			height);
+
 		Vector2 bottomRight = ToScreen(
 			rect.X + rect.Width,
 			rect.Y + rect.Height,
@@ -357,7 +373,8 @@ public sealed class UIRenderer : IDisposable
 		UILabel label,
 		UIRect rect,
 		int width,
-		int height)
+		int height,
+		float opacity)
 	{
 		if (!float.IsFinite(rect.X) ||
 			!float.IsFinite(rect.Y))
@@ -378,7 +395,8 @@ public sealed class UIRenderer : IDisposable
 			!float.IsFinite(color.Y) ||
 			!float.IsFinite(color.Z) ||
 			!float.IsFinite(color.W) ||
-			color.W <= 0.0f)
+			color.W <= 0.0f ||
+			opacity <= 0.0f)
 		{
 			return;
 		}
@@ -389,6 +407,8 @@ public sealed class UIRenderer : IDisposable
 			color,
 			Vector4.Zero,
 			Vector4.One);
+
+		color.W *= opacity;
 
 		float startX = rect.X;
 		float penX = startX;

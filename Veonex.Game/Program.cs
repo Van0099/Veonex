@@ -11,6 +11,7 @@ using Veonex.Render;
 using Veonex.UI.Controls;
 using Veonex.UI.Core;
 using Veonex.UI.Layout;
+using Veonex.UI.Styles;
 using Veonex.Core.Logging;
 
 /// <summary>
@@ -49,8 +50,7 @@ try
 		Size = new Vector2(912, 90),
 		Padding = UIMargin.All(6),
 		ChildrenLayout = UIChildrenLayout.Vertical,
-		ChildSpacing = 6,
-		BackgroundColor = Vector4.Zero
+		ChildSpacing = 6
 	};
 
 	UILabel counter = new(

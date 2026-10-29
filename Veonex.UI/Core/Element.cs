@@ -1,5 +1,6 @@
 ﻿using System.Numerics;
 using Veonex.UI.Layout;
+using Veonex.UI.Styles;
 
 namespace Veonex.UI.Core;
 
@@ -21,7 +22,7 @@ public class Element
 
 	public UIMargin Padding { get; set; } = UIMargin.Zero;
 
-	public Vector4 BackgroundColor { get; set; } = Vector4.Zero;
+	public UIStyle Style { get; set; } = new();
 
 	public UIHorizontalAlignment HorizontalAlignment { get; set; }
 		= UIHorizontalAlignment.Left;
