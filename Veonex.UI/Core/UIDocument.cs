@@ -1,55 +1,39 @@
-﻿using Veonex.UI.Layout;
-
-namespace Veonex.UI.Core;
+﻿namespace Veonex.UI.Core;
 
 public sealed class UIDocument
 {
-	public string Name { get; set; }
+	public Guid Id { get; } = Guid.NewGuid();
+
+	public string Name { get; set; } = "UIDocument";
 
 	public Element Root { get; }
 
-	public UIDocument(string name = "UIDocument")
+	public UIDocument()
 	{
-		ArgumentException.ThrowIfNullOrWhiteSpace(name);
+		Root = new Element("Root");
+	}
 
-		Name = name;
+	public UIDocument(Element root)
+	{
+		ArgumentNullException.ThrowIfNull(root);
 
-		Root = new Element
+		if (root.Parent is not null)
 		{
-			Name = "Root"
-		};
+			throw new InvalidOperationException(
+				"The root Element cannot have a parent.");
+		}
+
+		Root = root;
 	}
 
-	public void Add(Element element)
+	public void Update(double deltaTime)
 	{
-		Root.Add(element);
-	}
+		if (!double.IsFinite(deltaTime) || deltaTime < 0.0)
+		{
+			throw new ArgumentOutOfRangeException(
+				nameof(deltaTime));
+		}
 
-	public bool Remove(Element element)
-	{
-		return Root.Remove(element);
-	}
-
-	public void Clear()
-	{
-		Root.Clear();
-	}
-
-	public void ResolveLayout(int width, int height)
-	{
-		if (width < 0)
-			throw new ArgumentOutOfRangeException(nameof(width));
-
-		if (height < 0)
-			throw new ArgumentOutOfRangeException(nameof(height));
-
-		UILayoutResolver.Resolve(
-			Root,
-			new UIRect(0, 0, width, height));
-	}
-
-	internal void Update(double deltaTime)
-	{
 		Root.UpdateTree(deltaTime);
 	}
 }

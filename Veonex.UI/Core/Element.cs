@@ -1,12 +1,14 @@
-﻿using System.Numerics;
-using Veonex.UI.Layout;
-using Veonex.UI.Styles;
-
-namespace Veonex.UI.Core;
+﻿namespace Veonex.UI.Core;
 
 public class Element
 {
+	private readonly Dictionary<Type, UIModule> _modules = [];
 	private readonly List<Element> _children = [];
+
+	private readonly List<UIModule> _moduleUpdateBuffer = [];
+	private readonly List<Element> _childrenUpdateBuffer = [];
+
+	public Guid Id { get; } = Guid.NewGuid();
 
 	public string Name { get; set; } = string.Empty;
 
@@ -14,36 +16,151 @@ public class Element
 
 	public IReadOnlyList<Element> Children => _children;
 
-	public Vector2 Position { get; set; } = Vector2.Zero;
+	public IReadOnlyCollection<UIModule> Modules => _modules.Values;
 
-	public Vector2 Size { get; set; } = Vector2.Zero;
+	public Element()
+	{
+	}
 
-	public UIMargin Margin { get; set; } = UIMargin.Zero;
+	public Element(params UIModule[] modules)
+	{
+		ArgumentNullException.ThrowIfNull(modules);
 
-	public UIMargin Padding { get; set; } = UIMargin.Zero;
+		foreach (UIModule module in modules)
+			Add(module);
+	}
 
-	public UIStyle Style { get; set; } = new();
+	public Element(string name, params UIModule[] modules)
+	{
+		ArgumentNullException.ThrowIfNull(name);
+		ArgumentNullException.ThrowIfNull(modules);
 
-	public UIHorizontalAlignment HorizontalAlignment { get; set; }
-		= UIHorizontalAlignment.Left;
+		Name = name;
 
-	public UIVerticalAlignment VerticalAlignment { get; set; }
-		= UIVerticalAlignment.Top;
+		foreach (UIModule module in modules)
+			Add(module);
+	}
 
-	public UIChildrenLayout ChildrenLayout { get; set; }
-		= UIChildrenLayout.None;
+	public T Add<T>()
+		where T : UIModule, new()
+	{
+		return Add(new T());
+	}
 
-	public float ChildSpacing { get; set; }
+	public T Add<T>(Action<T> configure)
+		where T : UIModule, new()
+	{
+		ArgumentNullException.ThrowIfNull(configure);
 
-	public bool Visible { get; set; } = true;
+		T module = new();
 
-	public bool Enabled { get; set; } = true;
+		configure(module);
 
-	public UIRect LayoutRect { get; private set; } = UIRect.Empty;
+		return Add(module);
+	}
 
-	public void Add(Element child)
+	public T Add<T>(T module)
+		where T : UIModule
+	{
+		ArgumentNullException.ThrowIfNull(module);
+
+		Type type = module.GetType();
+
+		if (_modules.ContainsKey(type))
+		{
+			throw new InvalidOperationException(
+				$"Element already contains module {type.Name}.");
+		}
+
+		if (module.Element is not null)
+		{
+			throw new InvalidOperationException(
+				$"Module {type.Name} already belongs to an Element.");
+		}
+
+		module.Element = this;
+
+		_modules.Add(type, module);
+
+		try
+		{
+			module.OnAdded();
+		}
+		catch
+		{
+			_modules.Remove(type);
+			module.Element = null!;
+
+			throw;
+		}
+
+		return module;
+	}
+
+	public bool Has<T>()
+		where T : UIModule
+	{
+		return _modules.ContainsKey(typeof(T));
+	}
+
+	public T Get<T>()
+		where T : UIModule
+	{
+		if (_modules.TryGetValue(typeof(T), out UIModule? module))
+			return (T)module;
+
+		throw new InvalidOperationException(
+			$"Element does not contain module {typeof(T).Name}.");
+	}
+
+	public bool TryGet<T>(out T? module)
+		where T : UIModule
+	{
+		if (_modules.TryGetValue(typeof(T), out UIModule? existing))
+		{
+			module = (T)existing;
+			return true;
+		}
+
+		module = null;
+		return false;
+	}
+
+	public bool Remove<T>()
+		where T : UIModule
+	{
+		Type type = typeof(T);
+
+		if (!_modules.Remove(type, out UIModule? module))
+			return false;
+
+		try
+		{
+			module.OnRemoved();
+		}
+		finally
+		{
+			module.Element = null!;
+		}
+
+		return true;
+	}
+
+	public Element AddChild(Element child)
 	{
 		ArgumentNullException.ThrowIfNull(child);
+
+		if (ReferenceEquals(child, this))
+		{
+			throw new InvalidOperationException(
+				"An Element cannot be its own child.");
+		}
+
+		if (child.Parent is not null)
+		{
+			throw new InvalidOperationException(
+				"The Element already has a parent.");
+		}
 
 		for (Element? current = this;
 			 current is not null;
@@ -52,20 +169,17 @@ public class Element
 			if (ReferenceEquals(current, child))
 			{
 				throw new InvalidOperationException(
-					"An element cannot be added to itself or its descendants.");
+					"Adding this child would create a hierarchy cycle.");
 			}
 		}
 
-		if (ReferenceEquals(child.Parent, this))
-			return;
-
-		child.Parent?._children.Remove(child);
-
-		child.Parent = this;
 		_children.Add(child);
+		child.Parent = this;
+
+		return child;
 	}
 
-	public bool Remove(Element child)
+	public bool RemoveChild(Element child)
 	{
 		ArgumentNullException.ThrowIfNull(child);
 
@@ -73,10 +187,11 @@ public class Element
 			return false;
 
 		child.Parent = null;
+
 		return true;
 	}
 
-	public void Clear()
+	public void ClearChildren()
 	{
 		foreach (Element child in _children)
 			child.Parent = null;
@@ -84,20 +199,30 @@ public class Element
 		_children.Clear();
 	}
 
-	protected virtual void OnUpdate(double deltaTime)
-	{
-	}
-
-	internal void SetLayoutRect(UIRect rect)
-	{
-		LayoutRect = rect;
-	}
-
 	internal void UpdateTree(double deltaTime)
 	{
-		OnUpdate(deltaTime);
+		_moduleUpdateBuffer.Clear();
+		_moduleUpdateBuffer.AddRange(_modules.Values);
 
-		for (int i = 0; i < _children.Count; i++)
-			_children[i].UpdateTree(deltaTime);
+		foreach (UIModule module in _moduleUpdateBuffer)
+		{
+			if (ReferenceEquals(module.Element, this) &&
+				_modules.TryGetValue(
+					module.GetType(),
+					out UIModule? current) &&
+				ReferenceEquals(current, module))
+			{
+				module.Update(deltaTime);
+			}
+		}
+
+		_childrenUpdateBuffer.Clear();
+		_childrenUpdateBuffer.AddRange(_children);
+
+		foreach (Element child in _childrenUpdateBuffer)
+		{
+			if (ReferenceEquals(child.Parent, this))
+				child.UpdateTree(deltaTime);
+		}
 	}
 }
