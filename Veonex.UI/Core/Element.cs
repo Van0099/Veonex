@@ -1,4 +1,4 @@
-﻿namespace Veonex.UI.Core;
+﻿namespace Veonex.UI;
 
 public class Element
 {

@@ -1,4 +1,4 @@
-﻿namespace Veonex.UI.Core;
+﻿namespace Veonex.UI;
 
 public sealed class UIDocument
 {
@@ -35,5 +35,10 @@ public sealed class UIDocument
 		}
 
 		Root.UpdateTree(deltaTime);
+	}
+
+	public void ResolveLayout(double width, double height)
+	{
+		LayoutResolver.Resolve(Root, width, height);
 	}
 }
