@@ -54,6 +54,8 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly ResourceLayout _cameraLayout;
 	private readonly DeviceBuffer _cameraBuffer;
 	private readonly ResourceSet _cameraResourceSet;
+	private readonly DeviceBuffer _occlusionCameraBuffer;
+	private readonly ResourceSet _occlusionCameraResourceSet;
 	private readonly DeviceBuffer _shadowCameraBuffer;
 	private readonly ResourceSet _shadowCameraResourceSet;
 	private readonly DeviceBuffer _shadowMatrixBuffer;
@@ -136,6 +138,7 @@ public sealed unsafe class RenderBackend : IDisposable
 	private sealed class FrameContext
 	{
 		public required Matrix4x4 ViewProjection;
+		public required Matrix4x4 OcclusionViewProjection;
 		public required Matrix4x4 InverseViewProjection;
 		public required FrustumPlane[] FrustumPlanes;
 
@@ -608,6 +611,16 @@ public sealed unsafe class RenderBackend : IDisposable
 				_cameraLayout,
 				_cameraBuffer));
 
+		_occlusionCameraBuffer = Factory.CreateBuffer(
+			new BufferDescription(
+				(uint)Marshal.SizeOf<CameraBuffer>(),
+				BufferUsage.UniformBuffer));
+
+		_occlusionCameraResourceSet = Factory.CreateResourceSet(
+			new ResourceSetDescription(
+				_cameraLayout,
+				_occlusionCameraBuffer));
+
 		_shadowCameraBuffer = Factory.CreateBuffer(
 			new BufferDescription(
 				(uint)Marshal.SizeOf<CameraBuffer>(),
@@ -704,6 +717,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		_pipeline = CreatePipeline(transparent: false);
 		_transparentPipeline = CreatePipeline(transparent: true);
 		_skyPipeline = CreateSkyPipeline();
+		Logger.Info("Renderer", "Reverse-Z enabled for the main depth buffer (Hi-Z and shadows use forward-Z).");
 
 		_uiRenderer = new UIRenderer(
 			Factory,
@@ -1076,7 +1090,7 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		GraphicsDeviceOptions options = new(
 			debug: true,
-			swapchainDepthFormat: PixelFormat.D24_UNorm_S8_UInt,
+			swapchainDepthFormat: PixelFormat.D32_Float_S8_UInt,
 			syncToVerticalBlank: _parameters.VSync,
 			resourceBindingModel: ResourceBindingModel.Improved,
 			preferDepthRangeZeroToOne: true,
@@ -1352,7 +1366,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		DepthStencilStateDescription depthState = new(
 			depthTestEnabled: true,
 			depthWriteEnabled: !transparent,
-			comparisonKind: ComparisonKind.LessEqual);
+			comparisonKind: ComparisonKind.GreaterEqual);
 
 		BlendStateDescription blendState = transparent
 			? BlendStateDescription.SingleAlphaBlend
@@ -1482,14 +1496,19 @@ public sealed unsafe class RenderBackend : IDisposable
 		camera.AspectRatio = aspect;
 
 		Matrix4x4 view = CreateViewMatrix(camera);
-		Matrix4x4 projection = Matrix4x4.CreatePerspectiveFieldOfView(
-			(float)(camera.FieldOfView * Math.PI / 180.0),
-			aspect,
-			(float)camera.NearClip,
-			(float)camera.FarClip);
-		Matrix4x4 viewProjection = view * projection;
+		float fieldOfView = (float)(camera.FieldOfView * Math.PI / 180.0);
+		float nearClip = (float)camera.NearClip;
+		float farClip = (float)camera.FarClip;
 
-		if (!Matrix4x4.Invert(viewProjection, out Matrix4x4 inverseViewProjection))
+		Matrix4x4 projection = CreateReverseZPerspective(
+			fieldOfView, aspect, nearClip, farClip);
+		Matrix4x4 occlusionProjection = Matrix4x4.CreatePerspectiveFieldOfView(
+			fieldOfView, aspect, nearClip, farClip);
+
+		Matrix4x4 viewProjection = view * projection;
+		Matrix4x4 occlusionViewProjection = view * occlusionProjection;
+
+		if (!Matrix4x4.Invert(occlusionViewProjection, out Matrix4x4 inverseViewProjection))
 			return EmptyFrameContext();
 
 		FrustumPlane[] frustumPlanes = CreateFrustumPlanes(viewProjection);
@@ -1507,12 +1526,36 @@ public sealed unsafe class RenderBackend : IDisposable
 		return new FrameContext
 		{
 			ViewProjection = viewProjection,
+			OcclusionViewProjection = occlusionViewProjection,
 			InverseViewProjection = inverseViewProjection,
 			FrustumPlanes = frustumPlanes,
 			TotalInstanceCount = totalInstanceCount,
 			OpaqueInstanceCount = opaqueInstanceCount,
 			UseOcclusionCulling = useOcclusionCulling
 		};
+	}
+
+	private static Matrix4x4 CreateReverseZPerspective(
+		float verticalFieldOfView,
+		float aspectRatio,
+		float nearPlane,
+		float farPlane)
+	{
+		if (nearPlane <= 0f)
+			throw new ArgumentOutOfRangeException(nameof(nearPlane));
+
+		if (farPlane <= nearPlane)
+			throw new ArgumentOutOfRangeException(nameof(farPlane));
+
+		float yScale = 1f / MathF.Tan(verticalFieldOfView * 0.5f);
+		float xScale = yScale / aspectRatio;
+		float range = farPlane - nearPlane;
+
+		return new Matrix4x4(
+			xScale, 0f, 0f, 0f,
+			0f, yScale, 0f, 0f,
+			0f, 0f, nearPlane / range, -1f,
+			0f, 0f, nearPlane * farPlane / range, 0f);
 	}
 
 	private DirectionalLightData FindDirectionalLight(Scene scene)
@@ -1946,7 +1989,7 @@ public sealed unsafe class RenderBackend : IDisposable
 				_occlusionCullParametersBuffer!,
 				0,
 				new OcclusionCullParameters(
-					frame.ViewProjection,
+					frame.OcclusionViewProjection,
 					_renderWidth,
 					_renderHeight,
 					_hiZMipViews.Length,
@@ -1956,6 +1999,9 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_graphicsDevice.UpdateBuffer(
 			_cameraBuffer, 0, new CameraBuffer(frame.ViewProjection));
+
+		_graphicsDevice.UpdateBuffer(
+			_occlusionCameraBuffer, 0, new CameraBuffer(frame.OcclusionViewProjection));
 
 		_graphicsDevice.UpdateBuffer(
 			_skyBuffer,
@@ -1978,7 +2024,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		_commandList.SetFullViewports();
 		_commandList.ClearDepthStencil(1.0f);
 		_commandList.SetPipeline(_occlusionDepthPipeline!);
-		_commandList.SetGraphicsResourceSet(0, _cameraResourceSet);
+		_commandList.SetGraphicsResourceSet(0, _occlusionCameraResourceSet);
 
 		foreach (DrawBatch batch in _drawBatches.Values)
 		{
@@ -2070,7 +2116,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		_commandList.SetFramebuffer(_graphicsDevice.SwapchainFramebuffer);
 		_commandList.SetFullViewports();
 		_commandList.ClearColorTarget(0, RgbaFloat.Black);
-		_commandList.ClearDepthStencil(1.0f);
+		_commandList.ClearDepthStencil(0.0f);
 
 		RecordSkyPass(frame);
 		RecordOpaquePass(frame);
@@ -2263,6 +2309,7 @@ public sealed unsafe class RenderBackend : IDisposable
 	private static FrameContext EmptyFrameContext() => new()
 	{
 		ViewProjection = Matrix4x4.Identity,
+		OcclusionViewProjection = Matrix4x4.Identity,
 		InverseViewProjection = Matrix4x4.Identity,
 		FrustumPlanes = [],
 		TotalInstanceCount = 0,
@@ -2872,6 +2919,8 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_cameraResourceSet.Dispose();
 		_cameraBuffer.Dispose();
+		_occlusionCameraResourceSet.Dispose();
+		_occlusionCameraBuffer.Dispose();
 		_shadowCameraResourceSet.Dispose();
 		_shadowCameraBuffer.Dispose();
 		_shadowMatrixBuffer.Dispose();
