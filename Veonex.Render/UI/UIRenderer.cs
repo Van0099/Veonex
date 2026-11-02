@@ -25,6 +25,12 @@ public sealed class UIRenderer : IDisposable
 	private readonly Dictionary<string, UIFontAtlas> _fontAtlases =
 		new(StringComparer.OrdinalIgnoreCase);
 
+	private readonly Dictionary<string, CachedTexture> _backgroundTextures =
+		new(StringComparer.OrdinalIgnoreCase);
+
+	private readonly Texture _whiteTexture;
+	private readonly ResourceSet _whiteResourceSet;
+
 	private readonly List<DrawBatch> _batches = [];
 
 	private DeviceBuffer _vertexBuffer;
@@ -53,6 +59,25 @@ public sealed class UIRenderer : IDisposable
 			Position = position;
 			UV = uv;
 			Color = color;
+		}
+	}
+
+	private sealed class CachedTexture : IDisposable
+	{
+		public Texture Texture { get; }
+
+		public ResourceSet ResourceSet { get; }
+
+		public CachedTexture(Texture texture, ResourceSet resourceSet)
+		{
+			Texture = texture;
+			ResourceSet = resourceSet;
+		}
+
+		public void Dispose()
+		{
+			ResourceSet.Dispose();
+			Texture.Dispose();
 		}
 	}
 
@@ -102,6 +127,41 @@ public sealed class UIRenderer : IDisposable
 					"GlyphSampler",
 					ResourceKind.Sampler,
 					ShaderStages.Fragment)));
+
+		_whiteTexture = factory.CreateTexture(
+			TextureDescription.Texture2D(
+				1,
+				1,
+				1,
+				1,
+				PixelFormat.R8_G8_B8_A8_UNorm,
+				TextureUsage.Sampled));
+
+		try
+		{
+			graphicsDevice.UpdateTexture(
+				_whiteTexture,
+				new byte[] { 255, 255, 255, 255 },
+				0,
+				0,
+				0,
+				1,
+				1,
+				1,
+				0,
+				0);
+
+			_whiteResourceSet = factory.CreateResourceSet(
+				new ResourceSetDescription(
+					_textureLayout,
+					_whiteTexture,
+					_sampler));
+		}
+		catch
+		{
+			_whiteTexture.Dispose();
+			throw;
+		}
 
 		string shaderPath = Path.Combine(
 			AppContext.BaseDirectory,
@@ -222,22 +282,167 @@ public sealed class UIRenderer : IDisposable
 		int height)
 	{
 		if (element.TryGet<UITransform>(
-				out UITransform? transform) &&
-			element.TryGet<Text>(
-				out Text? text) &&
-			transform is not null &&
-			text is not null)
+			out UITransform? transform) &&
+			transform is not null)
 		{
-			AddText(
-				text,
-				transform.ResolvedRect,
-				width,
-				height);
+			if (element.TryGet<Background>(
+				out Background? background) &&
+				background is not null)
+			{
+				AddBackground(
+					background,
+					transform.ResolvedRect,
+					width,
+					height);
+			}
+
+			if (element.TryGet<Text>(out Text? text) &&
+				text is not null)
+			{
+				AddText(
+					text,
+					transform.ResolvedRect,
+					width,
+					height);
+			}
 		}
 
 		foreach (Element child in element.Children)
 		{
 			CollectElement(child, width, height);
+		}
+	}
+
+	private void AddBackground(
+		Background background,
+		RectD rect,
+		int width,
+		int height)
+	{
+		if (!double.IsFinite(rect.X) ||
+			!double.IsFinite(rect.Y) ||
+			!double.IsFinite(rect.Width) ||
+			!double.IsFinite(rect.Height) ||
+			rect.Width <= 0.0 ||
+			rect.Height <= 0.0)
+		{
+			return;
+		}
+
+		DVector4 sourceColor = background.Color;
+
+		if (double.IsFinite(sourceColor.X) &&
+			double.IsFinite(sourceColor.Y) &&
+			double.IsFinite(sourceColor.Z) &&
+			double.IsFinite(sourceColor.W))
+		{
+			Vector4 color = Vector4.Clamp(
+				new Vector4(
+					(float)sourceColor.X,
+					(float)sourceColor.Y,
+					(float)sourceColor.Z,
+					(float)sourceColor.W),
+				Vector4.Zero,
+				Vector4.One);
+
+			if (float.IsFinite(color.X) &&
+				float.IsFinite(color.Y) &&
+				float.IsFinite(color.Z) &&
+				float.IsFinite(color.W) &&
+				color.W > 0.0f)
+			{
+				DrawBatch colorBatch = BeginBatch(_whiteResourceSet);
+
+				AddRectangle(
+					colorBatch,
+					rect,
+					width,
+					height,
+					color);
+			}
+		}
+
+		if (!string.IsNullOrWhiteSpace(background.Image))
+		{
+			CachedTexture texture = GetOrCreateBackgroundTexture(
+				background.Image);
+
+			DrawBatch imageBatch = BeginBatch(texture.ResourceSet);
+
+			AddRectangle(
+				imageBatch,
+				rect,
+				width,
+				height,
+				Vector4.One);
+		}
+	}
+
+	private void AddRectangle(
+		DrawBatch batch,
+		RectD rect,
+		int width,
+		int height,
+		Vector4 color)
+	{
+		AddQuad(
+			batch,
+			ToScreen(rect.X, rect.Y, width, height),
+			ToScreen(rect.X + rect.Width, rect.Y, width, height),
+			ToScreen(rect.X + rect.Width, rect.Y + rect.Height, width, height),
+			ToScreen(rect.X, rect.Y + rect.Height, width, height),
+			new Vector3(0.0f, 0.0f, 0.0f),
+			new Vector3(1.0f, 0.0f, 0.0f),
+			new Vector3(1.0f, 1.0f, 0.0f),
+			new Vector3(0.0f, 1.0f, 0.0f),
+			color);
+	}
+
+	private CachedTexture GetOrCreateBackgroundTexture(string path)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+		string fullPath = Path.GetFullPath(path);
+
+		if (_backgroundTextures.TryGetValue(
+			fullPath,
+			out CachedTexture? existing))
+		{
+			return existing;
+		}
+
+		if (!File.Exists(fullPath))
+		{
+			throw new FileNotFoundException(
+				"The UI background image could not be found.",
+				fullPath);
+		}
+
+		Texture texture = TextureLoader.Load(
+			_factory,
+			_graphicsDevice,
+			fullPath);
+
+		ResourceSet? resourceSet = null;
+
+		try
+		{
+			resourceSet = _factory.CreateResourceSet(
+				new ResourceSetDescription(
+					_textureLayout,
+					texture,
+					_sampler));
+
+			CachedTexture cached = new(texture, resourceSet);
+			_backgroundTextures.Add(fullPath, cached);
+
+			return cached;
+		}
+		catch
+		{
+			resourceSet?.Dispose();
+			texture.Dispose();
+			throw;
 		}
 	}
 
@@ -611,6 +816,14 @@ public sealed class UIRenderer : IDisposable
 			atlas.Dispose();
 
 		_fontAtlases.Clear();
+
+		foreach (CachedTexture texture in _backgroundTextures.Values)
+			texture.Dispose();
+
+		_backgroundTextures.Clear();
+
+		_whiteResourceSet.Dispose();
+		_whiteTexture.Dispose();
 
 		_pipeline.Dispose();
 		_vertexBuffer.Dispose();

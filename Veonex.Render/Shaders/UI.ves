@@ -28,13 +28,15 @@ layout(location = 0) out vec4 OutputColor;
 
 void main()
 {
-    float coverage = texture(
+    vec4 sampled = texture(
         sampler2D(GlyphTexture, GlyphSampler),
-        FragUV.xy
-    ).r;
+        FragUV.xy);
 
-    float alpha = FragColor.a *
-        mix(1.0, coverage, FragUV.z);
+    float glyphMode = step(0.5, FragUV.z);
+    float glyphCoverage = mix(1.0, sampled.r, glyphMode);
+    vec4 imageColor = mix(sampled, vec4(1.0), glyphMode);
 
-    OutputColor = vec4(FragColor.rgb, alpha);
+    OutputColor = vec4(
+        FragColor.rgb * imageColor.rgb,
+        FragColor.a * imageColor.a * glyphCoverage);
 }
