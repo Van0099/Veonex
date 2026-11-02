@@ -76,12 +76,12 @@ internal sealed unsafe class UIFontAtlas : IDisposable
 		GlyphPage[] Pages);
 
 	private UIFontAtlas(
-		int fontSize,
-		byte[] fontData,
-		ResourceFactory factory,
-		GraphicsDevice graphicsDevice,
-		ResourceLayout textureLayout,
-		Sampler sampler)
+	float fontSize,
+	byte[] fontData,
+	ResourceFactory factory,
+	GraphicsDevice graphicsDevice,
+	ResourceLayout textureLayout,
+	Sampler sampler)
 	{
 		StbTrueType.stbtt_fontinfo? fontInfo =
 			StbTrueType.CreateFont(fontData, 0);
@@ -165,7 +165,7 @@ internal sealed unsafe class UIFontAtlas : IDisposable
 
 	public static UIFontAtlas Load(
 		string path,
-		int fontSize,
+		float fontSize,
 		ResourceFactory factory,
 		GraphicsDevice graphicsDevice,
 		ResourceLayout textureLayout,
@@ -173,7 +173,8 @@ internal sealed unsafe class UIFontAtlas : IDisposable
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
-		if (fontSize is < 8 or > 128)
+		if (!float.IsFinite(fontSize) ||
+			fontSize is < 8.0f or > 128.0f)
 		{
 			throw new ArgumentOutOfRangeException(
 				nameof(fontSize),
@@ -246,8 +247,8 @@ internal sealed unsafe class UIFontAtlas : IDisposable
 	}
 
 	private static BakedFont BakeFont(
-		byte[] fontData,
-		int fontSize)
+			byte[] fontData,
+			float fontSize)
 	{
 		(int First, int Count)[] ranges =
 		[

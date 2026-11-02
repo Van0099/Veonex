@@ -4,7 +4,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Veonex.Core;
 using Veonex.Mathematics;
-using Veonex.UI.Core;
+using UIDocument = Veonex.UI.UIDocument;
 using Veonex.Core.Logging;
 
 namespace Veonex.Render;

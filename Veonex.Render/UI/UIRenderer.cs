@@ -1,11 +1,11 @@
-﻿using System.Numerics;
+﻿using System.Globalization;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using NeoVeldrid;
 using Veonex.Assets;
-using Veonex.UI.Controls;
-using Veonex.UI.Core;
-using Veonex.UI.Layout;
-using Veonex.UI.Styles;
+using Veonex.Mathematics;
+using Veonex.UI;
+using UITransform = Veonex.UI.Transform;
 
 namespace Veonex.Render;
 
@@ -18,8 +18,6 @@ public sealed class UIRenderer : IDisposable
 
 	private readonly ResourceLayout _textureLayout;
 	private readonly Sampler _sampler;
-	private readonly Texture _whiteTexture;
-	private readonly ResourceSet _whiteResourceSet;
 
 	private readonly Shader[] _shaders;
 	private readonly Pipeline _pipeline;
@@ -104,35 +102,6 @@ public sealed class UIRenderer : IDisposable
 					"GlyphSampler",
 					ResourceKind.Sampler,
 					ShaderStages.Fragment)));
-
-		_whiteTexture = factory.CreateTexture(
-			TextureDescription.Texture2D(
-				1,
-				1,
-				1,
-				1,
-				PixelFormat.R8_UNorm,
-				TextureUsage.Sampled));
-
-		byte[] whitePixel = [255];
-
-		graphicsDevice.UpdateTexture(
-			_whiteTexture,
-			whitePixel,
-			0,
-			0,
-			0,
-			1,
-			1,
-			1,
-			0,
-			0);
-
-		_whiteResourceSet = factory.CreateResourceSet(
-			new ResourceSetDescription(
-				_textureLayout,
-				_whiteTexture,
-				_sampler));
 
 		string shaderPath = Path.Combine(
 			AppContext.BaseDirectory,
@@ -252,262 +221,266 @@ public sealed class UIRenderer : IDisposable
 		int width,
 		int height)
 	{
-		if (!element.Visible)
-			return;
-
-		UIRect rect = element.LayoutRect;
-
-		bool validRect =
-			float.IsFinite(rect.X) &&
-			float.IsFinite(rect.Y) &&
-			float.IsFinite(rect.Width) &&
-			float.IsFinite(rect.Height) &&
-			rect.Width > 0.0f &&
-			rect.Height > 0.0f;
-
-		UIStyle style = element.Style;
-		float opacity = NormalizeOpacity(style.Opacity);
-
-		Vector4 backgroundColor = style.Background;
-		backgroundColor.W *= opacity;
-
-		bool validBackground =
-			float.IsFinite(backgroundColor.X) &&
-			float.IsFinite(backgroundColor.Y) &&
-			float.IsFinite(backgroundColor.Z) &&
-			float.IsFinite(backgroundColor.W) &&
-			backgroundColor.W > 0.0f;
-
-		if (validRect && validBackground)
+		if (element.TryGet<UITransform>(
+				out UITransform? transform) &&
+			element.TryGet<Text>(
+				out Text? text) &&
+			transform is not null &&
+			text is not null)
 		{
-			AddRectangle(
-				rect,
-				Vector4.Clamp(
-					backgroundColor,
-					Vector4.Zero,
-					Vector4.One),
+			AddText(
+				text,
+				transform.ResolvedRect,
 				width,
 				height);
 		}
 
-		if (validRect &&
-			element is UILabel label &&
-			!string.IsNullOrEmpty(label.Text))
-		{
-			UIMargin padding = element.Padding;
-
-			UIRect textRect = new(
-				rect.X + padding.Left,
-				rect.Y + padding.Top,
-				MathF.Max(
-					0.0f,
-					rect.Width - padding.Left - padding.Right),
-				MathF.Max(
-					0.0f,
-					rect.Height - padding.Top - padding.Bottom));
-
-			if (textRect.Width > 0.0f && textRect.Height > 0.0f)
-			{
-				AddText(
-					label,
-					textRect,
-					width,
-					height,
-					opacity);
-			}
-		}
-
 		foreach (Element child in element.Children)
+		{
 			CollectElement(child, width, height);
-	}
-
-	private static float NormalizeOpacity(float opacity)
-	{
-		return float.IsFinite(opacity)
-			? Math.Clamp(opacity, 0.0f, 1.0f)
-			: 1.0f;
-	}
-
-	private void AddRectangle(
-		UIRect rect,
-		Vector4 color,
-		int width,
-		int height)
-	{
-		DrawBatch batch = BeginBatch(_whiteResourceSet);
-
-		Vector2 topLeft = ToScreen(rect.X, rect.Y, width, height);
-
-		Vector2 topRight = ToScreen(
-			rect.X + rect.Width,
-			rect.Y,
-			width,
-			height);
-
-		Vector2 bottomLeft = ToScreen(
-			rect.X,
-			rect.Y + rect.Height,
-			width,
-			height);
-
-		Vector2 bottomRight = ToScreen(
-			rect.X + rect.Width,
-			rect.Y + rect.Height,
-			width,
-			height);
-
-		AddQuad(
-			batch,
-			topLeft,
-			topRight,
-			bottomRight,
-			bottomLeft,
-			Vector3.Zero,
-			Vector3.Zero,
-			Vector3.Zero,
-			Vector3.Zero,
-			color);
+		}
 	}
 
 	private void AddText(
-		UILabel label,
-		UIRect rect,
+		Text text,
+		RectD rect,
 		int width,
-		int height,
-		float opacity)
+		int height)
 	{
-		if (!float.IsFinite(rect.X) ||
-			!float.IsFinite(rect.Y))
+		if (string.IsNullOrEmpty(text.Content))
+			return;
+
+		if (!double.IsFinite(rect.X) ||
+			!double.IsFinite(rect.Y) ||
+			!double.IsFinite(rect.Width) ||
+			!double.IsFinite(rect.Height) ||
+			rect.Width <= 0.0 ||
+			rect.Height <= 0.0)
 		{
 			return;
 		}
 
-		if (label.FontSize is < 8 or > 128)
+		DVector4 sourceColor = text.Color;
+
+		if (!double.IsFinite(sourceColor.X) ||
+			!double.IsFinite(sourceColor.Y) ||
+			!double.IsFinite(sourceColor.Z) ||
+			!double.IsFinite(sourceColor.W))
 		{
-			throw new ArgumentOutOfRangeException(
-				nameof(label.FontSize),
-				$"Invalid font size for UI label '{label.Name}'.");
+			return;
 		}
 
-		Vector4 color = label.TextColor;
+		Vector4 color = new(
+			(float)sourceColor.X,
+			(float)sourceColor.Y,
+			(float)sourceColor.Z,
+			(float)sourceColor.W);
 
 		if (!float.IsFinite(color.X) ||
 			!float.IsFinite(color.Y) ||
 			!float.IsFinite(color.Z) ||
-			!float.IsFinite(color.W) ||
-			color.W <= 0.0f ||
-			opacity <= 0.0f)
+			!float.IsFinite(color.W))
 		{
 			return;
 		}
-
-		UIFontAtlas atlas = GetOrCreateFontAtlas(label);
 
 		color = Vector4.Clamp(
 			color,
 			Vector4.Zero,
 			Vector4.One);
 
-		color.W *= opacity;
+		if (color.W <= 0.0f)
+			return;
 
-		float startX = rect.X;
-		float penX = startX;
-		float penY = rect.Y + atlas.AscentPixels;
-
-		DrawBatch batch = BeginBatch(atlas.ResourceSet);
+		UIFontAtlas atlas = GetOrCreateFontAtlas(text);
 
 		atlas.TryGetGlyph(
 			' ',
 			out StbTrueTypeSharp.StbTrueType.stbtt_bakedchar space,
 			out _);
 
-		string text = label.Text;
+		float tabAdvance = space.xadvance * 4.0f;
 
-		for (int i = 0; i < text.Length; i++)
+		DrawBatch batch = BeginBatch(atlas.ResourceSet);
+
+		string content = text.Content;
+
+		double penY = rect.Y + atlas.AscentPixels;
+		int lineStart = 0;
+
+		while (lineStart <= content.Length)
 		{
-			int codepoint = text[i];
+			int lineEnd = content.IndexOf('\n', lineStart);
+
+			if (lineEnd < 0)
+				lineEnd = content.Length;
+
+			float lineWidth = MeasureLine(
+				content,
+				lineStart,
+				lineEnd,
+				atlas,
+				tabAdvance);
+
+			double lineX = text.Alignment switch
+			{
+				TextAlignment.Left =>
+					rect.X,
+
+				TextAlignment.Center =>
+					rect.X + (rect.Width - lineWidth) * 0.5,
+
+				TextAlignment.Right =>
+					rect.Right - lineWidth,
+
+				_ => throw new ArgumentOutOfRangeException(
+					nameof(text.Alignment),
+					text.Alignment,
+					"Unsupported text alignment.")
+			};
+
+			double penX = lineX;
+
+			for (int i = lineStart; i < lineEnd; i++)
+			{
+				int codepoint = content[i];
+
+				if (codepoint == '\r')
+					continue;
+
+				if (codepoint == '\t')
+				{
+					penX += tabAdvance;
+					continue;
+				}
+
+				if (char.IsHighSurrogate(content[i]) &&
+					i + 1 < lineEnd &&
+					char.IsLowSurrogate(content[i + 1]))
+				{
+					codepoint = char.ConvertToUtf32(
+						content[i],
+						content[++i]);
+				}
+
+				atlas.TryGetGlyph(
+					codepoint,
+					out StbTrueTypeSharp.StbTrueType.stbtt_bakedchar glyph,
+					out int atlasOffsetX);
+
+				int glyphWidth = glyph.x1 - glyph.x0;
+				int glyphHeight = glyph.y1 - glyph.y0;
+
+				if (glyphWidth > 0 && glyphHeight > 0)
+				{
+					float left = MathF.Floor(
+						(float)(penX + glyph.xoff) + 0.5f);
+
+					float top = MathF.Floor(
+						(float)(penY + glyph.yoff) + 0.5f);
+
+					float right = left + glyphWidth;
+					float bottom = top + glyphHeight;
+
+					float u0 =
+						(atlasOffsetX + glyph.x0) /
+						(float)atlas.AtlasWidth;
+
+					float u1 =
+						(atlasOffsetX + glyph.x1) /
+						(float)atlas.AtlasWidth;
+
+					float v0 =
+						glyph.y0 / (float)atlas.AtlasHeight;
+
+					float v1 =
+						glyph.y1 / (float)atlas.AtlasHeight;
+
+					AddQuad(
+						batch,
+						ToScreen(left, top, width, height),
+						ToScreen(right, top, width, height),
+						ToScreen(right, bottom, width, height),
+						ToScreen(left, bottom, width, height),
+						new Vector3(u0, v0, 1.0f),
+						new Vector3(u1, v0, 1.0f),
+						new Vector3(u1, v1, 1.0f),
+						new Vector3(u0, v1, 1.0f),
+						color);
+				}
+
+				penX += glyph.xadvance;
+			}
+
+			if (lineEnd == content.Length)
+				break;
+
+			lineStart = lineEnd + 1;
+			penY += atlas.LineHeightPixels;
+		}
+	}
+
+	private static float MeasureLine(
+		string content,
+		int start,
+		int end,
+		UIFontAtlas atlas,
+		float tabAdvance)
+	{
+		float width = 0.0f;
+
+		for (int i = start; i < end; i++)
+		{
+			int codepoint = content[i];
 
 			if (codepoint == '\r')
 				continue;
 
-			if (codepoint == '\n')
-			{
-				penX = startX;
-				penY += atlas.LineHeightPixels;
-				continue;
-			}
-
 			if (codepoint == '\t')
 			{
-				penX += space.xadvance * 4.0f;
+				width += tabAdvance;
 				continue;
 			}
 
-			if (char.IsHighSurrogate(text[i]) &&
-				i + 1 < text.Length &&
-				char.IsLowSurrogate(text[i + 1]))
+			if (char.IsHighSurrogate(content[i]) &&
+				i + 1 < end &&
+				char.IsLowSurrogate(content[i + 1]))
 			{
 				codepoint = char.ConvertToUtf32(
-					text[i],
-					text[++i]);
+					content[i],
+					content[++i]);
 			}
 
 			atlas.TryGetGlyph(
 				codepoint,
 				out StbTrueTypeSharp.StbTrueType.stbtt_bakedchar glyph,
-				out int atlasOffsetX);
+				out _);
 
-			int glyphWidth = glyph.x1 - glyph.x0;
-			int glyphHeight = glyph.y1 - glyph.y0;
-
-			if (glyphWidth > 0 && glyphHeight > 0)
-			{
-				float left = MathF.Floor(
-					penX + glyph.xoff + 0.5f);
-
-				float top = MathF.Floor(
-					penY + glyph.yoff + 0.5f);
-
-				float right = left + glyphWidth;
-				float bottom = top + glyphHeight;
-
-				float u0 =
-					(atlasOffsetX + glyph.x0) /
-					(float)atlas.AtlasWidth;
-
-				float u1 =
-					(atlasOffsetX + glyph.x1) /
-					(float)atlas.AtlasWidth;
-
-				float v0 = glyph.y0 / (float)atlas.AtlasHeight;
-				float v1 = glyph.y1 / (float)atlas.AtlasHeight;
-
-				AddQuad(
-					batch,
-					ToScreen(left, top, width, height),
-					ToScreen(right, top, width, height),
-					ToScreen(right, bottom, width, height),
-					ToScreen(left, bottom, width, height),
-					new Vector3(u0, v0, 1.0f),
-					new Vector3(u1, v0, 1.0f),
-					new Vector3(u1, v1, 1.0f),
-					new Vector3(u0, v1, 1.0f),
-					color);
-			}
-
-			penX += glyph.xadvance;
+			width += glyph.xadvance;
 		}
+
+		return width;
 	}
 
-	private UIFontAtlas GetOrCreateFontAtlas(UILabel label)
+	private UIFontAtlas GetOrCreateFontAtlas(Text text)
 	{
-		ArgumentException.ThrowIfNullOrWhiteSpace(label.FontPath);
+		ArgumentException.ThrowIfNullOrWhiteSpace(text.FontPath);
 
-		string fullPath = Path.GetFullPath(label.FontPath);
+		float fontSize = (float)text.FontSize;
+
+		if (!float.IsFinite(fontSize) ||
+			fontSize is < 8.0f or > 128.0f)
+		{
+			throw new ArgumentOutOfRangeException(
+				nameof(text.FontSize),
+				"Font size must be between 8 and 128 pixels.");
+		}
+
+		string fullPath = Path.GetFullPath(text.FontPath);
 
 		string cacheKey =
-			fullPath + "\0" + label.FontSize.ToString(
-				System.Globalization.CultureInfo.InvariantCulture);
+			fullPath + "\0" +
+			fontSize.ToString("R", CultureInfo.InvariantCulture);
 
 		if (_fontAtlases.TryGetValue(
 			cacheKey,
@@ -518,7 +491,7 @@ public sealed class UIRenderer : IDisposable
 
 		UIFontAtlas atlas = UIFontAtlas.Load(
 			fullPath,
-			label.FontSize,
+			fontSize,
 			_factory,
 			_graphicsDevice,
 			_textureLayout,
@@ -581,14 +554,14 @@ public sealed class UIRenderer : IDisposable
 	}
 
 	private static Vector2 ToScreen(
-		float x,
-		float y,
+		double x,
+		double y,
 		int width,
 		int height)
 	{
 		return new Vector2(
-			x * (2.0f / width) - 1.0f,
-			1.0f - y * (2.0f / height));
+			(float)(x * (2.0 / width) - 1.0),
+			(float)(1.0 - y * (2.0 / height)));
 	}
 
 	private void EnsureVertexCapacity(int requiredCount)
@@ -639,12 +612,9 @@ public sealed class UIRenderer : IDisposable
 
 		_fontAtlases.Clear();
 
-		_whiteResourceSet.Dispose();
-
 		_pipeline.Dispose();
 		_vertexBuffer.Dispose();
 
-		_whiteTexture.Dispose();
 		_sampler.Dispose();
 		_textureLayout.Dispose();
 

@@ -1,5 +1,4 @@
 ﻿using SDL;
-using System.Numerics;
 using Veonex.Assets;
 using Veonex.Core;
 using Veonex.Core.Logging;
@@ -8,15 +7,12 @@ using Veonex.Input;
 using Veonex.Mathematics;
 using Veonex.Physics;
 using Veonex.Render;
-using Veonex.UI.Controls;
-using Veonex.UI.Core;
-using Veonex.UI.Layout;
-using Veonex.UI.Styles;
-using Veonex.Core.Logging;
+using Veonex.UI;
+using Transform = Veonex.Core.Transform;
 
 /// <summary>
 /// Physics sandbox: a physics-driven first-person player, a floor,
-/// and 100 dynamic cubes which fall and collide.
+/// and 50 dynamic cubes which fall and collide.
 /// </summary>
 WindowParameters parameters = new()
 {
@@ -41,57 +37,46 @@ try
 
 	InputManager input = new();
 
-	UISystem ui = new();
-	UIDocument uiDocument = new("HUD");
+	const string fontPath = "assets/fonts/Roboto-Regular.ttf";
 
-	Element topHud = new()
+	UIDocument uiDocument = new()
 	{
-		Name = "TopHud",
-		Size = new Vector2(912, 90),
-		Padding = UIMargin.All(6),
-		ChildrenLayout = UIChildrenLayout.Vertical,
-		ChildSpacing = 6
+		Name = "HUD"
 	};
 
-	UILabel counter = new(
-		"60 FPS",
-		"assets/fonts/Roboto-Regular.ttf",
-		12)
-	{
-		Name = "Counter",
-		Size = new Vector2(296, 24),
-		TextColor = Vector4.One
-	};
+	Element counter = TextPrefab.Create(
+		name: "Counter",
+		content: "60 FPS",
+		fontPath: fontPath,
+		fontSize: 12.0,
+		position: new DVector2(6.0, 6.0),
+		size: new DVector2(296.0, 24.0));
 
-	UILabel renderStatsLabel = new(
-		"",
-		"assets/fonts/Roboto-Regular.ttf",
-		12)
-	{
-		Name = "RenderStats",
-		Size = new Vector2(900, 48),
-		TextColor = Vector4.One
-	};
+	Element renderStatsLabel = TextPrefab.Create(
+		name: "RenderStats",
+		content: string.Empty,
+		fontPath: fontPath,
+		fontSize: 12.0,
+		position: new DVector2(6.0, 36.0),
+		size: new DVector2(900.0, 48.0));
 
-	UILabel consoleLabel = new(
-		"Veonex Console",
-		"assets/fonts/Roboto-Regular.ttf",
-		12)
-	{
-		Name = "Console",
-		Position = Vector2.Zero,
-		Size = new Vector2(600, 300),
-		Margin = UIMargin.All(6),
-		HorizontalAlignment = UIHorizontalAlignment.Left,
-		VerticalAlignment = UIVerticalAlignment.Bottom,
-		TextColor = Vector4.One
-	};
+	Element consoleLabel = TextPrefab.Create(
+		name: "Console",
+		content: "Veonex Console",
+		fontPath: fontPath,
+		fontSize: 12.0,
+		position: DVector2.Zero,
+		size: new DVector2(600.0, 300.0),
+		layout: new Layout
+		{
+			HorizontalAlignment = HorizontalAlignment.Left,
+			VerticalAlignment = VerticalAlignment.Bottom,
+			Margin = new Thickness(6.0)
+		});
 
-	topHud.Add(counter);
-	topHud.Add(renderStatsLabel);
-
-	uiDocument.Add(topHud);
-	uiDocument.Add(consoleLabel);
+	uiDocument.Root.AddChild(counter);
+	uiDocument.Root.AddChild(renderStatsLabel);
+	uiDocument.Root.AddChild(consoleLabel);
 
 	Scene scene = new();
 
@@ -107,7 +92,6 @@ try
 
 	physics.Gravity = new DVector3(0.0, -9.81, 0.0);
 
-	// All cubes use the same mesh.
 	Mesh cubeMesh = CubeMeshTemplate.Create();
 
 	Material floorMaterial = new(
@@ -145,31 +129,21 @@ try
 
 	Entity floorEntity = scene.Add("Floor");
 
-	Transform floorTransform =
-		floorEntity.Add<Transform>();
+	Transform floorTransform = floorEntity.Add<Transform>();
+	floorTransform.Position = new DVector3(0.0, -0.5, 0.0);
+	floorTransform.Scale = new DVector3(30.0, 0.5, 30.0);
 
-	floorTransform.Position =
-		new DVector3(0.0, -0.5, 0.0);
-
-	floorTransform.Scale =
-		new DVector3(30.0, 0.5, 30.0);
-
-	MeshRenderer floorRenderer =
-		floorEntity.Add<MeshRenderer>();
-
+	MeshRenderer floorRenderer = floorEntity.Add<MeshRenderer>();
 	floorRenderer.Mesh = cubeMesh;
 	floorRenderer.Material = floorMaterial;
 
-	Collider floorCollider =
-		floorEntity.Add<Collider>();
-
+	Collider floorCollider = floorEntity.Add<Collider>();
 	floorCollider.SimpleGeometry = true;
 
 	Entity playerEntity = scene.Add("Player");
 
 	Transform playerTransform = playerEntity.Add<Transform>();
 	playerTransform.Position = new DVector3(0.0, 1.05, 11.0);
-
 	playerTransform.Scale = new DVector3(0.7, 0.9, 0.7);
 
 	Mesh capsuleMesh = CapsuleMeshTemplate.Create(
@@ -179,24 +153,20 @@ try
 		ringsPerHemisphere: 8,
 		cylinderSegments: 1);
 
-	Material playerMaterial = new Material(
-									"WhiteMat",
-									"Basic",
-									new DVector4(1, 1, 1, 1));
+	Material playerMaterial = new(
+		"WhiteMat",
+		"Basic",
+		new DVector4(1, 1, 1, 1));
 
 	MeshRenderer playerRenderer = playerEntity.Add<MeshRenderer>();
 	playerRenderer.Mesh = capsuleMesh;
 	playerRenderer.Material = playerMaterial;
 	playerRenderer.Visible = true;
 
-	Collider playerCollider =
-		playerEntity.Add<Collider>();
-
+	Collider playerCollider = playerEntity.Add<Collider>();
 	playerCollider.SimpleGeometry = true;
 
-	PhysicsBody playerBody =
-		playerEntity.Add<PhysicsBody>();
-
+	PhysicsBody playerBody = playerEntity.Add<PhysicsBody>();
 	playerBody.Mass = 75.0;
 	playerBody.Drag = 0.05;
 	playerBody.AngularDrag = 5.0;
@@ -209,86 +179,52 @@ try
 	const double cubeScale = 0.5;
 	const double stackSpacing = 1.15;
 
-	List<Mesh> loadedMeshes = new List<Mesh>(ModelLoader.Load("assets/models/model2.glb"));
+	List<Mesh> loadedMeshes = new(ModelLoader.Load("assets/models/model2.glb"));
 	Mesh modelMesh = loadedMeshes[0];
 
 	Random random = new(128);
 
 	for (int i = 0; i < cubeCount; i++)
 	{
-		int layer =
-			i / (columnsPerAxis * columnsPerAxis);
+		int layer = i / (columnsPerAxis * columnsPerAxis);
+		int cell = i % (columnsPerAxis * columnsPerAxis);
+		int column = cell % columnsPerAxis;
+		int row = cell / columnsPerAxis;
 
-		int cell =
-			i % (columnsPerAxis * columnsPerAxis);
+		Entity cubeEntity = scene.Add($"FallingCube_{i + 1:000}");
 
-		int column =
-			cell % columnsPerAxis;
-
-		int row =
-			cell / columnsPerAxis;
-
-		Entity cubeEntity =
-			scene.Add($"FallingCube_{i + 1:000}");
-
-		Transform cubeTransform =
-			cubeEntity.Add<Transform>();
-
+		Transform cubeTransform = cubeEntity.Add<Transform>();
 		cubeTransform.Scale = new DVector3(
 			cubeScale,
 			cubeScale,
 			cubeScale);
 
 		cubeTransform.Position = new DVector3(
-			(column - (columnsPerAxis - 1) * 0.5)
-				* stackSpacing,
+			(column - (columnsPerAxis - 1) * 0.5) * stackSpacing,
+			4.0 + layer * 1.08 + random.NextDouble() * 0.04,
+			(row - (columnsPerAxis - 1) * 0.5) * stackSpacing);
 
-			4.0 + layer * 1.08
-				+ random.NextDouble() * 0.04,
-
-			(row - (columnsPerAxis - 1) * 0.5)
-				* stackSpacing);
-
-		MeshRenderer cubeRenderer =
-			cubeEntity.Add<MeshRenderer>();
-
+		MeshRenderer cubeRenderer = cubeEntity.Add<MeshRenderer>();
 		cubeRenderer.Mesh = modelMesh;
+		cubeRenderer.Material = cubeMaterials[random.Next(cubeMaterials.Length)];
 
-		cubeRenderer.Material =
-			cubeMaterials[random.Next(cubeMaterials.Length)];
-
-		Collider cubeCollider =
-			cubeEntity.Add<Collider>();
-
+		Collider cubeCollider = cubeEntity.Add<Collider>();
 		cubeCollider.SimpleGeometry = false;
 		cubeCollider.CollisionQuality = 0.1;
 
-		PhysicsBody cubeBody =
-			cubeEntity.Add<PhysicsBody>();
-
+		PhysicsBody cubeBody = cubeEntity.Add<PhysicsBody>();
 		cubeBody.Mass = 50.0;
 		cubeBody.Drag = 0.02;
 		cubeBody.AngularDrag = 0.08;
 		cubeBody.UseGravity = true;
 	}
 
-	// -------------------------------------------------------------
-	// CAMERA
-	//
-	// Camera follows the player via PhysicsPlayerController.
-	// -------------------------------------------------------------
-
 	Entity cameraEntity = scene.Add("Camera");
-
 	cameraEntity.Add<Transform>();
 
-	Camera camera =
-		cameraEntity.Add<Camera>();
+	Camera camera = cameraEntity.Add<Camera>();
+	camera.AspectRatio = (double)parameters.Width / parameters.Height;
 
-	camera.AspectRatio =
-		(double)parameters.Width / parameters.Height;
-
-	// Register scene colliders and bodies before the first frame.
 	physics.Update(scene, 0.0);
 
 	PhysicsPlayerController playerController = new(
@@ -316,39 +252,32 @@ try
 	System.Diagnostics.Stopwatch stopwatch =
 		System.Diagnostics.Stopwatch.StartNew();
 
-	double previousTime =
-		stopwatch.Elapsed.TotalSeconds;
+	double previousTime = stopwatch.Elapsed.TotalSeconds;
 
 	const double maxDeltaTime = 0.05;
 
 	double fpsTimer = 0.0;
 	int fpsFrames = 0;
-	int currentFps = 0;
 
 	List<string> consoleLines = [];
 	const int MaxConsoleLines = 32;
 
 	while (!input.QuitRequested)
 	{
-		double currentTime =
-			stopwatch.Elapsed.TotalSeconds;
-
-		double realDeltaTime =
-			currentTime - previousTime;
-
+		double currentTime = stopwatch.Elapsed.TotalSeconds;
+		double realDeltaTime = currentTime - previousTime;
 		previousTime = currentTime;
 
-		double deltaTime =
-			Math.Min(realDeltaTime, maxDeltaTime);
+		double deltaTime = Math.Min(realDeltaTime, maxDeltaTime);
 
 		fpsTimer += realDeltaTime;
 		fpsFrames++;
 
 		if (fpsTimer >= 1.0)
 		{
-			currentFps = (int)Math.Round(fpsFrames / fpsTimer);
+			int currentFps = (int)Math.Round(fpsFrames / fpsTimer);
 
-			counter.Text = $"{currentFps} FPS";
+			counter.Get<Text>().Content = $"{currentFps} FPS";
 
 			fpsTimer = 0.0;
 			fpsFrames = 0;
@@ -358,7 +287,7 @@ try
 		{
 			if (entry.Category == "RenderStats")
 			{
-				renderStatsLabel.Text = entry.Message;
+				renderStatsLabel.Get<Text>().Content = entry.Message;
 				continue;
 			}
 
@@ -377,11 +306,7 @@ try
 				consoleLines.RemoveAt(0);
 		}
 
-		consoleLabel.Text = consoleLines.Count == 0
-			? "Veonex Console"
-			: string.Join("\n", consoleLines);
-
-		consoleLabel.Text = consoleLines.Count == 0
+		consoleLabel.Get<Text>().Content = consoleLines.Count == 0
 			? "Veonex Console"
 			: string.Join("\n", consoleLines);
 
@@ -390,14 +315,7 @@ try
 		if (input.QuitRequested)
 			break;
 
-		ui.Update(
-			uiDocument,
-			deltaTime,
-			new UIRect(
-				0,
-				0,
-				input.WindowWidth,
-				input.WindowHeight));
+		uiDocument.Update(deltaTime);
 
 		playerController.UpdateInput(deltaTime);
 
@@ -410,24 +328,22 @@ try
 			if (input.WindowHeight > 0)
 			{
 				camera.AspectRatio =
-					(double)input.WindowWidth /
-					input.WindowHeight;
+					(double)input.WindowWidth / input.WindowHeight;
 			}
 		}
 
-		if (input.IsKeyPressed(
-			SDL_Scancode.SDL_SCANCODE_F11))
-		{
+		if (input.IsKeyPressed(SDL_Scancode.SDL_SCANCODE_F11))
 			renderer.ToggleFullscreen();
-		}
 
 		scene.Update(deltaTime);
-
 		physics.Update(scene, deltaTime);
-
 		playerController.UpdateCamera();
 
-		renderer.RenderFrame(scene, camera, currentTime, uiDocument);
+		renderer.RenderFrame(
+			scene,
+			camera,
+			currentTime,
+			uiDocument);
 	}
 
 	stopwatch.Stop();

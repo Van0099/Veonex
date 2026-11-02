@@ -18,6 +18,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Veonex.Assets\Veonex.Assets.csproj" />
     <ProjectReference Include="..\Veonex.Core\Veonex.Core.csproj" />
+    <ProjectReference Include="..\Veonex.Mathematics\Veonex.Mathematics.csproj" />
 	<ProjectReference Include="..\Veonex.UI\Veonex.UI.csproj" />
   </ItemGroup>
 
