@@ -5,7 +5,7 @@ using NeoVeldrid;
 using Veonex.Assets;
 using Veonex.Mathematics;
 using Veonex.UI;
-using UITransform = Veonex.UI.Transform;
+using UITransform = Veonex.UI.RectTransform;
 
 namespace Veonex.Render;
 

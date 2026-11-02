@@ -19,7 +19,7 @@ internal static class LayoutResolver
 
 		RectD viewport = new(0.0, 0.0, width, height);
 
-		if (root.TryGet<Transform>(out Transform? rootTransform) &&
+		if (root.TryGet<RectTransform>(out RectTransform? rootTransform) &&
 			rootTransform is not null)
 		{
 			rootTransform.SetResolvedRect(viewport);
@@ -36,9 +36,9 @@ internal static class LayoutResolver
 		{
 			RectD childRect = parentRect;
 
-			if (child.Has<Transform>())
+			if (child.Has<RectTransform>())
 			{
-				Transform transform = child.Get<Transform>();
+				RectTransform transform = child.Get<RectTransform>();
 
 				Layout? layout = child.Has<Layout>()
 					? child.Get<Layout>()
@@ -63,7 +63,7 @@ internal static class LayoutResolver
 
 	private static RectD ResolveRect(
 		RectD parent,
-		Transform transform,
+		RectTransform transform,
 		Layout? layout)
 	{
 		DVector2 position = transform.Position;

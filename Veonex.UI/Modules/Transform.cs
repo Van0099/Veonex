@@ -2,7 +2,7 @@
 
 namespace Veonex.UI;
 
-public sealed class Transform : UIModule
+public sealed class RectTransform : UIModule
 {
 	private DVector2 _position;
 	private DVector2 _size;
@@ -45,16 +45,16 @@ public sealed class Transform : UIModule
 
 	public DVector2 ResolvedSize => ResolvedRect.Size;
 
-	public Transform()
+	public RectTransform()
 	{
 	}
 
-	public Transform(DVector2 size)
+	public RectTransform(DVector2 size)
 	{
 		Size = size;
 	}
 
-	public Transform(DVector2 position, DVector2 size)
+	public RectTransform(DVector2 position, DVector2 size)
 	{
 		Position = position;
 		Size = size;

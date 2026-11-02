@@ -22,7 +22,7 @@ public static class TextPrefab
 
 		Element element = new(
 			name,
-			new Transform(position, size),
+			new RectTransform(position, size),
 			new Text
 			{
 				Content = content,
