@@ -19,7 +19,7 @@ WindowParameters parameters = new()
 	Width = 1920,
 	Height = 1080,
 	Title = "Veonex - Physics Sandbox",
-	VSync = false,
+	VSync = true,
 	Resizable = true,
 	Fullscreen = true
 };
