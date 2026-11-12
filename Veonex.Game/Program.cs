@@ -11,14 +11,19 @@ using Veonex.UI;
 using Transform = Veonex.Core.Transform;
 
 /// <summary>
-/// Physics sandbox: a physics-driven first-person player, a floor,
-/// and 50 dynamic cubes which fall and collide.
+/// Mipmap stress test:
+///  - giant grass.png floor (minification + mip test on natural texture)
+///  - long prototype.png "grid runway" going into the distance
+///  - images.png side walls forming a textured corridor
+///  - procedural black/white checkerboard far away (definitive grid test)
+///  - reference planes at increasing distance with all three textures
+///  - physics-driven first-person player
 /// </summary>
 WindowParameters parameters = new()
 {
 	Width = 1920,
 	Height = 1080,
-	Title = "Veonex - Physics Sandbox",
+	Title = "Veonex - Mipmap Stress Test",
 	VSync = true,
 	Resizable = true,
 	Fullscreen = true
@@ -94,52 +99,156 @@ try
 
 	Mesh cubeMesh = CubeMeshTemplate.Create();
 
-	Material floorMaterial = new(
-		"PhysicsFloor",
-		"Basic",
-		new DVector4(1, 1, 1, 1.0),
-		"assets/textures/prototype.png");
+	// ==================== Текстуры ====================
+	const string texGrass = "assets/textures/grass.png";
+	const string texImages = "assets/textures/images.png";
+	const string texProto = "assets/textures/prototype.png";
 
-	Material[] cubeMaterials =
-	[
-		new Material(
-			"CubeGreen",
-			"Basic",
-			new DVector4(0.48, 0.77, 0.23, 1.0),
-			"assets/textures/images.png"),
+	Material grassMat = new("GrassMat", "Basic", new DVector4(1, 1, 1, 1), texGrass);
+	Material imagesMat = new("ImagesMat", "Basic", new DVector4(1, 1, 1, 1), texImages);
+	Material protoMat = new("ProtoMat", "Basic", new DVector4(1, 1, 1, 1), texProto);
 
-		new Material(
-			"CubeBlue",
-			"Basic",
-			new DVector4(0.23, 0.55, 0.92, 1.0),
-			"assets/textures/images.png"),
+	// Сплошные цвета для процедурной шахматки (не используют текстуру — рендерер
+	// подставит внутреннюю белую 1x1 текстуру).
+	Material blackTile = new("BlackTile", "Basic", new DVector4(0.05, 0.05, 0.05, 1));
+	Material whiteTile = new("WhiteTile", "Basic", new DVector4(0.95, 0.95, 0.95, 1));
 
-		new Material(
-			"CubeOrange",
-			"Basic",
-			new DVector4(0.95, 0.48, 0.18, 1.0),
-			"assets/textures/images.png"),
+	Material[] texturedMats = [grassMat, imagesMat, protoMat];
 
-		new Material(
-			"CubePurple",
-			"Basic",
-			new DVector4(0.65, 0.35, 0.88, 1.0),
-			"assets/textures/images.png"),
-	];
+	// ==================== Гигантский травяной пол ====================
+	// Текстура растянута на 500x500 — отличный тест minification + мипмапов
+	// (вдали должна плавно усредняться, без мерцания).
+	Entity grassFloor = scene.Add("GrassFloor");
+	Transform grassFloorT = grassFloor.Add<Transform>();
+	grassFloorT.Position = new DVector3(0, -0.5, 0);
+	grassFloorT.Scale = new DVector3(500, 0.5, 500);
+	MeshRenderer grassFloorR = grassFloor.Add<MeshRenderer>();
+	grassFloorR.Mesh = cubeMesh;
+	grassFloorR.Material = grassMat;
+	Collider grassFloorC = grassFloor.Add<Collider>();
+	grassFloorC.SimpleGeometry = true;
 
-	Entity floorEntity = scene.Add("Floor");
+	// ==================== Длинная "полоса" из prototype.png ====================
+	// Идёт вдаль по центру коридора. У прототип-текстур обычно есть сетка —
+	// если да, это и есть "сеточка вдали" прямо на геометрии.
+	Entity runway = scene.Add("GridRunway");
+	Transform runwayT = runway.Add<Transform>();
+	runwayT.Position = new DVector3(0, -0.23, -120);
+	runwayT.Scale = new DVector3(40, 0.02, 280); // от Z = +20 до Z = -260
+	MeshRenderer runwayR = runway.Add<MeshRenderer>();
+	runwayR.Mesh = cubeMesh;
+	runwayR.Material = protoMat;
 
-	Transform floorTransform = floorEntity.Add<Transform>();
-	floorTransform.Position = new DVector3(0.0, -0.5, 0.0);
-	floorTransform.Scale = new DVector3(30.0, 0.5, 30.0);
+	// ==================== Боковые стены из images.png ====================
+	for (int side = -1; side <= 1; side += 2)
+	{
+		Entity wall = scene.Add($"Wall_{(side < 0 ? "L" : "R")}");
+		Transform wallT = wall.Add<Transform>();
+		wallT.Position = new DVector3(side * 20, 5, -120);
+		wallT.Scale = new DVector3(0.5, 10, 280);
+		MeshRenderer wallR = wall.Add<MeshRenderer>();
+		wallR.Mesh = cubeMesh;
+		wallR.Material = imagesMat;
+		Collider wallC = wall.Add<Collider>();
+		wallC.SimpleGeometry = true;
+	}
 
-	MeshRenderer floorRenderer = floorEntity.Add<MeshRenderer>();
-	floorRenderer.Mesh = cubeMesh;
-	floorRenderer.Material = floorMaterial;
+	// ==================== Дальняя стена из prototype.png ====================
+	Entity farWall = scene.Add("FarWall");
+	Transform farWallT = farWall.Add<Transform>();
+	farWallT.Position = new DVector3(0, 10, -260);
+	farWallT.Scale = new DVector3(50, 25, 0.5);
+	MeshRenderer farWallR = farWall.Add<MeshRenderer>();
+	farWallR.Mesh = cubeMesh;
+	farWallR.Material = protoMat;
 
-	Collider floorCollider = floorEntity.Add<Collider>();
-	floorCollider.SimpleGeometry = true;
+	// ==================== Процедурная шахматка вдали ====================
+	// Эталонный тест "сеточки вдали", не зависящий от содержимого текстуры.
+	// 10 колонок x 20 рядов по 4 юнита = 40 x 80 юнитов, на Z = -100..-180.
+	const int gridCols = 10;
+	const int gridRows = 20;
+	const double tileSize = 4.0;
+	const double gridStartZ = -100.0;
+	const double gridY = -0.20;
 
+	int checkerCount = 0;
+	for (int row = 0; row < gridRows; row++)
+	{
+		for (int col = 0; col < gridCols; col++)
+		{
+			bool isDark = (row + col) % 2 == 0;
+			Material mat = isDark ? blackTile : whiteTile;
+
+			Entity tile = scene.Add($"Checker_{row:00}_{col:00}");
+			Transform tileT = tile.Add<Transform>();
+			tileT.Position = new DVector3(
+				(col - (gridCols - 1) * 0.5) * tileSize,
+				gridY,
+				gridStartZ - row * tileSize);
+			tileT.Scale = new DVector3(tileSize, 0.02, tileSize);
+
+			MeshRenderer tileR = tile.Add<MeshRenderer>();
+			tileR.Mesh = cubeMesh;
+			tileR.Material = mat;
+			checkerCount++;
+		}
+	}
+
+	// ==================== Опорные плоскости вдали (все три текстуры) ====================
+	// 9 плоскостей, уходящих вдаль, чередуя текстуры. Размер растёт с дистанцией,
+	// чтобы на экране они занимали похожую площадь — удобно сравнивать мип-переходы.
+	const int refPlaneCount = 9;
+	const double refStartZ = -5.0;
+	const double refSpacing = 6.0;
+	const double refBaseSize = 2.0;
+
+	for (int i = 0; i < refPlaneCount; i++)
+	{
+		Entity p = scene.Add($"RefPlane_{i:00}");
+		Transform pT = p.Add<Transform>();
+		double size = refBaseSize + i * 1.2;
+		pT.Position = new DVector3(
+			(i % 3 - 1) * 7.0,
+			size * 0.5 + 0.2,
+			refStartZ - i * refSpacing);
+		pT.Scale = new DVector3(size, size, 0.05);
+
+		MeshRenderer pR = p.Add<MeshRenderer>();
+		pR.Mesh = cubeMesh;
+		pR.Material = texturedMats[i % 3];
+	}
+
+	// ==================== Ближние опорные плоскости (по одной на текстуру) ====================
+	for (int i = 0; i < 3; i++)
+	{
+		Entity p = scene.Add($"CloseRef_{i}");
+		Transform pT = p.Add<Transform>();
+		pT.Position = new DVector3(-4.0 + i * 4.0, 1.5, 6.0);
+		pT.Scale = new DVector3(2.0, 2.0, 0.05);
+
+		MeshRenderer pR = p.Add<MeshRenderer>();
+		pR.Mesh = cubeMesh;
+		pR.Material = texturedMats[i];
+	}
+
+	// ==================== Декоративные колонны вдоль коридора ====================
+	// Нагрузка текстурами: 20 колонн с чередующимися текстурами.
+	for (int i = 0; i < 10; i++)
+	{
+		for (int side = -1; side <= 1; side += 2)
+		{
+			Entity p = scene.Add($"Pillar_{i:00}_{(side < 0 ? "L" : "R")}");
+			Transform pT = p.Add<Transform>();
+			pT.Position = new DVector3(side * 14, 3, -20 - i * 22);
+			pT.Scale = new DVector3(1.5, 6, 1.5);
+
+			MeshRenderer pR = p.Add<MeshRenderer>();
+			pR.Mesh = cubeMesh;
+			pR.Material = texturedMats[(i + (side > 0 ? 1 : 0)) % 3];
+		}
+	}
+
+	// ==================== Игрок ====================
 	Entity playerEntity = scene.Add("Player");
 
 	Transform playerTransform = playerEntity.Add<Transform>();
@@ -173,52 +282,7 @@ try
 	playerBody.UseGravity = true;
 	playerBody.FreezeRotation = true;
 
-	const int cubeCount = 50;
-	const int columnsPerAxis = 5;
-
-	const double cubeScale = 0.5;
-	const double stackSpacing = 1.15;
-
-	List<Mesh> loadedMeshes = new(ModelLoader.Load("assets/models/model2.glb"));
-	Mesh modelMesh = loadedMeshes[0];
-
-	Random random = new(128);
-
-	for (int i = 0; i < cubeCount; i++)
-	{
-		int layer = i / (columnsPerAxis * columnsPerAxis);
-		int cell = i % (columnsPerAxis * columnsPerAxis);
-		int column = cell % columnsPerAxis;
-		int row = cell / columnsPerAxis;
-
-		Entity cubeEntity = scene.Add($"FallingCube_{i + 1:000}");
-
-		Transform cubeTransform = cubeEntity.Add<Transform>();
-		cubeTransform.Scale = new DVector3(
-			cubeScale,
-			cubeScale,
-			cubeScale);
-
-		cubeTransform.Position = new DVector3(
-			(column - (columnsPerAxis - 1) * 0.5) * stackSpacing,
-			4.0 + layer * 1.08 + random.NextDouble() * 0.04,
-			(row - (columnsPerAxis - 1) * 0.5) * stackSpacing);
-
-		MeshRenderer cubeRenderer = cubeEntity.Add<MeshRenderer>();
-		cubeRenderer.Mesh = modelMesh;
-		cubeRenderer.Material = cubeMaterials[random.Next(cubeMaterials.Length)];
-
-		Collider cubeCollider = cubeEntity.Add<Collider>();
-		cubeCollider.SimpleGeometry = false;
-		cubeCollider.CollisionQuality = 0.1;
-
-		PhysicsBody cubeBody = cubeEntity.Add<PhysicsBody>();
-		cubeBody.Mass = 50.0;
-		cubeBody.Drag = 0.02;
-		cubeBody.AngularDrag = 0.08;
-		cubeBody.UseGravity = true;
-	}
-
+	// ==================== Камера ====================
 	Entity cameraEntity = scene.Add("Camera");
 	cameraEntity.Add<Transform>();
 
@@ -233,19 +297,21 @@ try
 		input,
 		renderer,
 		physics,
-		lookTarget: new DVector3(0.0, 3.0, 0.0),
+		lookTarget: new DVector3(0.0, 2.0, -100.0),
 		moveSpeed: 6.0,
 		jumpSpeed: 7.0,
 		mouseSensitivity: 0.15,
 		eyeHeight: 0.62);
 
-	Console.WriteLine("Physics sandbox ready.");
+	Console.WriteLine("Mipmap stress test ready.");
 
 	Console.WriteLine(
 		"WASD: move | Space: jump | Mouse: look | " +
 		"Esc: release mouse | Left click: recapture | F11: fullscreen");
 
 	Console.WriteLine(
+		$"Textures: grass.png + images.png + prototype.png | " +
+		$"Checkerboard tiles: {checkerCount} | " +
 		$"Dynamic bodies: {physics.BodyCount} | " +
 		$"Colliders: {physics.ColliderCount}");
 
