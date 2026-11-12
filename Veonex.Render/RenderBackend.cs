@@ -26,6 +26,7 @@ public sealed unsafe class RenderBackend : IDisposable
 
 	private readonly GraphicsDevice _graphicsDevice;
 	private readonly CommandList _commandList;
+	private readonly CommandList _textureUploadCommandList;
 
 	private readonly Shader[] _shaders;
 	private readonly Pipeline _pipeline;
@@ -42,6 +43,7 @@ public sealed unsafe class RenderBackend : IDisposable
 	private const float MaximumShadowDistance = 80f;
 
 	private readonly Sampler _linearSampler;
+	private readonly Sampler _textureSampler;
 	private readonly Sampler _shadowSampler;
 	private readonly Texture _whiteTexture;
 	private readonly Texture? _shadowTexture;
@@ -544,11 +546,33 @@ public sealed unsafe class RenderBackend : IDisposable
 				SamplerAddressMode.Wrap,
 				SamplerFilter.MinLinear_MagLinear_MipLinear,
 				null,
-				16,
+				1,
 				0,
-				16,
+				uint.MaxValue,
 				0,
 				SamplerBorderColor.TransparentBlack));
+
+		bool supportsAnisotropy = _graphicsDevice.Features.SamplerAnisotropy;
+		_textureSampler = Factory.CreateSampler(
+			new SamplerDescription(
+				SamplerAddressMode.Wrap,
+				SamplerAddressMode.Wrap,
+				SamplerAddressMode.Wrap,
+				supportsAnisotropy
+					? SamplerFilter.Anisotropic
+					: SamplerFilter.MinLinear_MagLinear_MipLinear,
+				null,
+				supportsAnisotropy ? 16u : 1u,
+				0,
+				uint.MaxValue,
+				0,
+				SamplerBorderColor.TransparentBlack));
+
+		Logger.Info(
+			"Textures",
+			supportsAnisotropy
+				? "Anisotropic filtering enabled (up to 16x)."
+				: "Anisotropic filtering unavailable; using trilinear filtering.");
 
 		_shadowSampler = Factory.CreateSampler(
 			new SamplerDescription(
@@ -593,6 +617,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		_shadowMapSupported = supported;
 
 		_commandList = Factory.CreateCommandList();
+		_textureUploadCommandList = Factory.CreateCommandList();
 
 		_cameraLayout = Factory.CreateResourceLayout(
 			new ResourceLayoutDescription(
@@ -2429,8 +2454,14 @@ public sealed unsafe class RenderBackend : IDisposable
 		Texture texture = TextureLoader.Load(
 			Factory,
 			_graphicsDevice,
+			_textureUploadCommandList,
 			fullPath,
-			out bool hasAlpha);
+			out bool hasAlpha,
+			out int mipLevels);
+
+		Logger.Info(
+			"Textures",
+			$"Loaded '{Path.GetFileName(fullPath)}' with {mipLevels} mip level(s).");
 
 		_textureCache.Add(fullPath, texture);
 		_textureAlphaCache[fullPath] = hasAlpha;
@@ -2461,7 +2492,7 @@ public sealed unsafe class RenderBackend : IDisposable
 				_materialLayout,
 				buffer,
 				texture,
-				_linearSampler));
+				_textureSampler));
 
 		MaterialResources resources = new(buffer, resourceSet);
 		_materialCache.Add(material.Id, resources);
@@ -2863,6 +2894,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		_disposed = true;
 
 		_commandList.Dispose();
+		_textureUploadCommandList.Dispose();
 		_lightingResourceSet.Dispose();
 
 		_pipeline.Dispose();
@@ -2932,6 +2964,7 @@ public sealed unsafe class RenderBackend : IDisposable
 		_lightingLayout.Dispose();
 
 		_whiteTexture.Dispose();
+		_textureSampler.Dispose();
 		_linearSampler.Dispose();
 		_shadowSampler.Dispose();
 
