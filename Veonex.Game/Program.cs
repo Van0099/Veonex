@@ -1,4 +1,5 @@
 ﻿using SDL;
+using Veonex.Assets;
 using Veonex.Core;
 using Veonex.Core.Logging;
 using Veonex.Game;
@@ -99,6 +100,10 @@ try
 	physics.Gravity = new DVector3(0.0, -9.81, 0.0);
 
 	Mesh cubeMesh = CubeMeshTemplate.Create();
+	var loadedMeshes = ModelLoader.Load("assets/models/object.glb")
+		.Concat(ModelLoader.Load("assets/models/suzanne.glb"))
+		.ToList();
+	Mesh modelMesh = loadedMeshes[0];
 
 	const string texBasic = "assets/textures/prototype.png";
 
@@ -106,9 +111,17 @@ try
 		new DVector4(1, 1, 1, 1), 
 		texBasic, 
 		textureTiling: true, 
-		tiling: new DVector2(20.0, 20.0));
+		tiling: new DVector2(10.0, 10.0));
 
 	Material[] texturedMats = [basicMat];
+
+	Material[] brickMaterials =
+	[
+		new("BrickRed",    "Basic", new DVector4(1.0, 0.2, 0.2, 1.0), "assets/textures/brick.png"),
+		new("BrickGreen",  "Basic", new DVector4(0.2, 1.0, 0.2, 1.0), "assets/textures/brick.png"),
+		new("BrickBlue",   "Basic", new DVector4(0.2, 0.2, 1.0, 1.0), "assets/textures/brick.png"),
+		new("BrickYellow", "Basic", new DVector4(1.0, 1.0, 0.2, 1.0), "assets/textures/brick.png")
+	];
 
 	// Floor
 	Entity floor = scene.Add("Floor");
@@ -154,11 +167,68 @@ try
 		wallCollider.SimpleGeometry = true;
 	}
 
+	Entity rampEntity = scene.Add("Ramp");
+
+	Transform rampTransform = rampEntity.Add<Transform>();
+	rampTransform.Position = new DVector3(0.0, 1.0, 0.0);
+	rampTransform.Scale = new DVector3(2.0, 2.0, 2.0);
+
+	MeshRenderer rampRenderer = rampEntity.Add<MeshRenderer>();
+	rampRenderer.Mesh = modelMesh;
+	rampRenderer.Material = basicMat;
+
+	Collider rampCollider = rampEntity.Add<Collider>();
+
+	const int boxesPerCorner = 5;
+	const int randomBoxCount = 25;
+	const double cornerDistance = 30.0;
+	const double cornerHeight = 10.0;
+	const double spawnRadius = 20.0;
+	const double boxSize = 1.0;
+	const double stackGap = 0.02;
+
+	var rng = new Random();
+
+	Material PickMaterial() => brickMaterials[rng.Next(brickMaterials.Length)];
+
+	double diag = cornerDistance / Math.Sqrt(2.0);
+
+	DVector3[] corners =
+	[
+		new( diag, 0,  diag),
+	new(-diag, 0,  diag),
+	new( diag, 0, -diag),
+	new(-diag, 0, -diag),
+];
+
+	for (int ci = 0; ci < corners.Length; ci++)
+	{
+		DVector3 basePos = corners[ci];
+
+		for (int i = 0; i < boxesPerCorner; i++)
+		{
+			double y = cornerHeight + boxSize / 2.0 + i * (boxSize + stackGap);
+			SpawnBox($"CornerBox_{ci}_{i}", new DVector3(basePos.X, y, basePos.Z), PickMaterial());
+		}
+	}
+
+	for (int i = 0; i < randomBoxCount; i++)
+	{
+		double angle = rng.NextDouble() * Math.PI * 2.0;
+		double r = spawnRadius * Math.Sqrt(rng.NextDouble());
+
+		double x = Math.Cos(angle) * r;
+		double z = Math.Sin(angle) * r;
+		double y = 0.5 + boxSize / 2.0;
+
+		SpawnBox($"RandomBox_{i}", new DVector3(x, y, z), PickMaterial());
+	}
+
 	// Player
 	Entity playerEntity = scene.Add("Player");
 
 	Transform playerTransform = playerEntity.Add<Transform>();
-	playerTransform.Position = new DVector3(0.0, 1.05, 11.0);
+	playerTransform.Position = new DVector3(0.0, 2, 0);
 	playerTransform.Scale = new DVector3(0.7, 0.9, 0.7);
 
 	Mesh capsuleMesh = CapsuleMeshTemplate.Create(
@@ -221,6 +291,30 @@ try
 
 	List<string> consoleLines = [];
 	const int MaxConsoleLines = 32;
+
+	void SpawnBox(string name, DVector3 position, Material material)
+	{
+		Entity box = scene.Add(name);
+
+		Transform t = box.Add<Transform>();
+		t.Position = position;
+		t.Scale = new DVector3(boxSize, boxSize, boxSize);
+
+		MeshRenderer r = box.Add<MeshRenderer>();
+		r.Mesh = loadedMeshes[1];
+		r.Material = material;
+		r.Visible = true;
+
+		Collider c = box.Add<Collider>();
+		c.SimpleGeometry = false;
+
+		PhysicsBody body = box.Add<PhysicsBody>();
+		body.Mass = 10.0;
+		body.Drag = 0.05;
+		body.AngularDrag = 8.0;
+		body.UseGravity = true;
+		body.FreezeRotation = false;
+	}
 
 	while (!input.QuitRequested)
 	{
