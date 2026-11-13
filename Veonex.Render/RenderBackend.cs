@@ -6,6 +6,7 @@ using Veonex.Core;
 using Veonex.Mathematics;
 using UIDocument = Veonex.UI.UIDocument;
 using Veonex.Core.Logging;
+using Veonex.Render.TextureCompression;
 
 namespace Veonex.Render;
 
@@ -27,6 +28,8 @@ public sealed unsafe class RenderBackend : IDisposable
 	private readonly GraphicsDevice _graphicsDevice;
 	private readonly CommandList _commandList;
 	private readonly CommandList _textureUploadCommandList;
+
+	private readonly GpuTextureCompressor? _gpuTextureCompressor;
 
 	private readonly Shader[] _shaders;
 	private readonly Pipeline _pipeline;
@@ -618,6 +621,57 @@ public sealed unsafe class RenderBackend : IDisposable
 
 		_commandList = Factory.CreateCommandList();
 		_textureUploadCommandList = Factory.CreateCommandList();
+
+		_commandList = Factory.CreateCommandList();
+		_textureUploadCommandList = Factory.CreateCommandList();
+
+		_gpuTextureCompressor = null;
+
+		bool supportsCompute = _graphicsDevice.Features.ComputeShader;
+		bool supportsStructured = _graphicsDevice.Features.StructuredBuffer;
+
+		bool supportsBc7 = _graphicsDevice.GetPixelFormatSupport(
+			PixelFormat.BC7_UNorm,
+			TextureType.Texture2D,
+			TextureUsage.Sampled);
+
+		Logger.Info(
+			"Textures",
+			$"GPU BC7 capabilities: Compute={supportsCompute}, " +
+			$"StructuredBuffer={supportsStructured}, BC7={supportsBc7}");
+
+		if (supportsCompute && supportsStructured && supportsBc7)
+		{
+			try
+			{
+				string bc7shaderPath = Path.Combine(
+					AppContext.BaseDirectory,
+					"Shaders",
+					"BC7Encode.comp");
+
+				_gpuTextureCompressor = new GpuTextureCompressor(
+					Factory,
+					_graphicsDevice,
+					bc7shaderPath);
+
+				Logger.Info(
+					"Textures",
+					"GPU BC7 Mode 6 compression initialized.");
+			}
+			catch (Exception ex)
+			{
+				Logger.Warning(
+					"Textures",
+					$"GPU BC7 initialization failed: {ex.Message}",
+					ex);
+			}
+		}
+		else
+		{
+			Logger.Warning(
+				"Textures",
+				"GPU BC7 is unavailable. Check device capabilities.");
+		}
 
 		_cameraLayout = Factory.CreateResourceLayout(
 			new ResourceLayoutDescription(
@@ -2456,12 +2510,9 @@ public sealed unsafe class RenderBackend : IDisposable
 			_graphicsDevice,
 			_textureUploadCommandList,
 			fullPath,
+			_gpuTextureCompressor,
 			out bool hasAlpha,
 			out int mipLevels);
-
-		Logger.Info(
-			"Textures",
-			$"Loaded '{Path.GetFileName(fullPath)}' with {mipLevels} mip level(s).");
 
 		_textureCache.Add(fullPath, texture);
 		_textureAlphaCache[fullPath] = hasAlpha;
@@ -2973,6 +3024,8 @@ public sealed unsafe class RenderBackend : IDisposable
 		_skyLayout.Dispose();
 
 		_uiRenderer.Dispose();
+
+		_gpuTextureCompressor?.Dispose();
 
 		_graphicsDevice.Dispose();
 

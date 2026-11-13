@@ -1,0 +1,268 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SourcePixelsBuffer
+{
+    uint Pixels[];
+} SourcePixels;
+
+layout(std430, set = 0, binding = 1) writeonly buffer CompressedBlocksBuffer
+{
+    uvec4 Blocks[];
+} CompressedBlocks;
+
+layout(std140, set = 0, binding = 2) uniform EncodeParameters
+{
+    uvec4 SizeInfo;
+    uvec4 OffsetInfo;
+} Parameters;
+
+const uint BC7Weights4[16] = uint[16](
+    0u, 4u, 9u, 13u,
+    17u, 21u, 26u, 30u,
+    34u, 38u, 43u, 47u,
+    51u, 55u, 60u, 64u);
+
+shared vec4 SharedPixels[16];
+shared vec4 SharedEndpoints[2];
+shared uvec4 SharedQuantizedEndpoints[2];
+shared uint SharedPBits[2];
+shared uint SharedIndices[16];
+
+void QuantizeEndpoint(
+    vec4 source,
+    out uvec4 quantized,
+    out uint pBit,
+    out vec4 decoded)
+{
+    float bestError = 1e30;
+    quantized = uvec4(0u);
+    pBit = 0u;
+    decoded = vec4(0.0);
+
+    for (uint candidatePBit = 0u; candidatePBit < 2u; candidatePBit++)
+    {
+        vec4 quantizedFloat = clamp(
+            round((source - vec4(float(candidatePBit))) * 0.5),
+            vec4(0.0),
+            vec4(127.0));
+
+        uvec4 candidateQuantized = uvec4(quantizedFloat);
+        vec4 candidateDecoded = vec4(
+            candidateQuantized * 2u + uvec4(candidatePBit));
+
+        vec4 difference = candidateDecoded - source;
+        float error = dot(difference, difference);
+
+        if (error < bestError)
+        {
+            bestError = error;
+            quantized = candidateQuantized;
+            pBit = candidatePBit;
+            decoded = candidateDecoded;
+        }
+    }
+}
+
+void WriteBits(
+    inout uvec4 destination,
+    uint bitOffset,
+    uint bitCount,
+    uint value)
+{
+    for (uint bit = 0u; bit < bitCount; bit++)
+    {
+        if ((value & (1u << bit)) == 0u)
+            continue;
+
+        uint destinationBit = bitOffset + bit;
+        uint destinationWord = destinationBit >> 5u;
+        uint destinationShift = destinationBit & 31u;
+
+        destination[destinationWord] |= 1u << destinationShift;
+    }
+}
+
+void main()
+{
+    uint lane = gl_LocalInvocationID.x;
+    uint blockIndex = gl_WorkGroupID.x;
+
+    uint width = Parameters.SizeInfo.x;
+    uint height = Parameters.SizeInfo.y;
+    uint blocksX = Parameters.SizeInfo.z;
+    uint blocksY = Parameters.SizeInfo.w;
+
+    uint blockCount = blocksX * blocksY;
+    if (blockIndex >= blockCount)
+        return;
+
+    uvec2 blockCoordinate = uvec2(
+        blockIndex % blocksX,
+        blockIndex / blocksX);
+
+    uvec2 localCoordinate = uvec2(lane & 3u, lane >> 2u);
+    uvec2 texelCoordinate = blockCoordinate * 4u + localCoordinate;
+    texelCoordinate = min(texelCoordinate, uvec2(width - 1u, height - 1u));
+
+    uint sourceIndex = Parameters.OffsetInfo.x +
+        texelCoordinate.y * width + texelCoordinate.x;
+
+    uint packedPixel = SourcePixels.Pixels[sourceIndex];
+
+    SharedPixels[lane] = vec4(
+        float(packedPixel & 0xFFu),
+        float((packedPixel >> 8u) & 0xFFu),
+        float((packedPixel >> 16u) & 0xFFu),
+        float((packedPixel >> 24u) & 0xFFu));
+
+    barrier();
+
+    if (lane == 0u)
+    {
+        vec4 meanColor = vec4(0.0);
+        for (uint i = 0u; i < 16u; i++)
+            meanColor += SharedPixels[i];
+        meanColor *= 1.0 / 16.0;
+
+        mat4 covariance = mat4(0.0);
+        for (uint i = 0u; i < 16u; i++)
+        {
+            vec4 difference = SharedPixels[i] - meanColor;
+            covariance += outerProduct(difference, difference);
+        }
+
+        vec4 axis = vec4(0.5);
+        for (int iteration = 0; iteration < 8; iteration++)
+        {
+            vec4 nextAxis = covariance * axis;
+            float axisLength = length(nextAxis);
+
+            if (axisLength > 1e-6)
+                axis = nextAxis / axisLength;
+        }
+
+        float minimumProjection = 1e30;
+        float maximumProjection = -1e30;
+        vec4 endpoint0 = SharedPixels[0];
+        vec4 endpoint1 = SharedPixels[0];
+
+        for (uint i = 0u; i < 16u; i++)
+        {
+            vec4 color = SharedPixels[i];
+            float projection = dot(color - meanColor, axis);
+
+            if (projection < minimumProjection)
+            {
+                minimumProjection = projection;
+                endpoint0 = color;
+            }
+
+            if (projection > maximumProjection)
+            {
+                maximumProjection = projection;
+                endpoint1 = color;
+            }
+        }
+
+        QuantizeEndpoint(
+            endpoint0,
+            SharedQuantizedEndpoints[0],
+            SharedPBits[0],
+            SharedEndpoints[0]);
+
+        QuantizeEndpoint(
+            endpoint1,
+            SharedQuantizedEndpoints[1],
+            SharedPBits[1],
+            SharedEndpoints[1]);
+    }
+
+    barrier();
+
+    vec4 pixelColor = SharedPixels[lane];
+    float bestError = 1e30;
+    uint bestIndex = 0u;
+
+    for (uint index = 0u; index < 16u; index++)
+    {
+        float weight = float(BC7Weights4[index]) * (1.0 / 64.0);
+        vec4 candidateColor = mix(
+            SharedEndpoints[0],
+            SharedEndpoints[1],
+            weight);
+
+        vec4 difference = candidateColor - pixelColor;
+        float error = dot(difference, difference);
+
+        if (error < bestError)
+        {
+            bestError = error;
+            bestIndex = index;
+        }
+    }
+
+    SharedIndices[lane] = bestIndex;
+
+    barrier();
+
+    if (lane == 0u)
+    {
+        if (SharedIndices[0] >= 8u)
+        {
+            vec4 endpointSwap = SharedEndpoints[0];
+            SharedEndpoints[0] = SharedEndpoints[1];
+            SharedEndpoints[1] = endpointSwap;
+
+            uvec4 quantizedSwap = SharedQuantizedEndpoints[0];
+            SharedQuantizedEndpoints[0] = SharedQuantizedEndpoints[1];
+            SharedQuantizedEndpoints[1] = quantizedSwap;
+
+            uint pBitSwap = SharedPBits[0];
+            SharedPBits[0] = SharedPBits[1];
+            SharedPBits[1] = pBitSwap;
+
+            for (uint i = 0u; i < 16u; i++)
+                SharedIndices[i] = 15u - SharedIndices[i];
+        }
+
+        uvec4 encodedBlock = uvec4(0u);
+        WriteBits(encodedBlock, 0u, 7u, 0x40u);
+
+        uint bitOffset = 7u;
+
+        for (uint channel = 0u; channel < 4u; channel++)
+        {
+            WriteBits(
+                encodedBlock,
+                bitOffset,
+                7u,
+                SharedQuantizedEndpoints[0][channel]);
+            bitOffset += 7u;
+
+            WriteBits(
+                encodedBlock,
+                bitOffset,
+                7u,
+                SharedQuantizedEndpoints[1][channel]);
+            bitOffset += 7u;
+        }
+
+        WriteBits(encodedBlock, 63u, 1u, SharedPBits[0]);
+        WriteBits(encodedBlock, 64u, 1u, SharedPBits[1]);
+
+        bitOffset = 65u;
+        WriteBits(encodedBlock, bitOffset, 3u, SharedIndices[0]);
+        bitOffset += 3u;
+
+        for (uint i = 1u; i < 16u; i++)
+        {
+            WriteBits(encodedBlock, bitOffset, 4u, SharedIndices[i]);
+            bitOffset += 4u;
+        }
+
+        uint destinationBlock = Parameters.OffsetInfo.y + blockIndex;
+        CompressedBlocks.Blocks[destinationBlock] = encodedBlock;
+    }
+}
