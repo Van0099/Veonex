@@ -96,7 +96,7 @@ try
 	light.Color = new DVector3(1.0, 1.0, 1.0);
 	light.Intensity = 1.0;
 
-	physics.Gravity = new DVector3(0.0, -9.81, -100.0);
+	physics.Gravity = new DVector3(0.0, -9.81, 0.0);
 
 	Mesh cubeMesh = CubeMeshTemplate.Create();
 
