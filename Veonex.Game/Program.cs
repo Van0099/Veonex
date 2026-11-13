@@ -1,5 +1,4 @@
 ﻿using SDL;
-using Veonex.Assets;
 using Veonex.Core;
 using Veonex.Core.Logging;
 using Veonex.Game;
@@ -8,16 +7,9 @@ using Veonex.Mathematics;
 using Veonex.Physics;
 using Veonex.Render;
 using Veonex.UI;
-using Transform = Veonex.Core.Transform;
 
 /// <summary>
-/// Mipmap stress test:
-///  - giant grass.png floor (minification + mip test on natural texture)
-///  - long prototype.png "grid runway" going into the distance
-///  - images.png side walls forming a textured corridor
-///  - procedural black/white checkerboard far away (definitive grid test)
-///  - reference planes at increasing distance with all three textures
-///  - physics-driven first-person player
+/// test sandbox project
 /// </summary>
 WindowParameters parameters = new()
 {
@@ -99,156 +91,57 @@ try
 
 	Mesh cubeMesh = CubeMeshTemplate.Create();
 
-	// ==================== Текстуры ====================
-	const string texGrass = "assets/textures/grass.png";
-	const string texImages = "assets/textures/images.png";
-	const string texProto = "assets/textures/prototype.png";
+	const string texBasic = "assets/textures/prototype.png";
 
-	Material grassMat = new("GrassMat", "Basic", new DVector4(1, 1, 1, 1), texGrass);
-	Material imagesMat = new("ImagesMat", "Basic", new DVector4(1, 1, 1, 1), texImages);
-	Material protoMat = new("ProtoMat", "Basic", new DVector4(1, 1, 1, 1), texProto);
+	Material basicMat = new("Basic", "Basic", new DVector4(1, 1, 1, 1), texBasic);
 
-	// Сплошные цвета для процедурной шахматки (не используют текстуру — рендерер
-	// подставит внутреннюю белую 1x1 текстуру).
-	Material blackTile = new("BlackTile", "Basic", new DVector4(0.05, 0.05, 0.05, 1));
-	Material whiteTile = new("WhiteTile", "Basic", new DVector4(0.95, 0.95, 0.95, 1));
+	Material[] texturedMats = [basicMat];
 
-	Material[] texturedMats = [grassMat, imagesMat, protoMat];
+	// Floor
+	Entity floor = scene.Add("Floor");
+	Transform floorTransform = floor.Add<Transform>();
+	floorTransform.Position = DVector3.Zero;
+	floorTransform.Scale = new DVector3(50, 1, 50);
 
-	// ==================== Гигантский травяной пол ====================
-	// Текстура растянута на 500x500 — отличный тест minification + мипмапов
-	// (вдали должна плавно усредняться, без мерцания).
-	Entity grassFloor = scene.Add("GrassFloor");
-	Transform grassFloorT = grassFloor.Add<Transform>();
-	grassFloorT.Position = new DVector3(0, -0.5, 0);
-	grassFloorT.Scale = new DVector3(500, 0.5, 500);
-	MeshRenderer grassFloorR = grassFloor.Add<MeshRenderer>();
-	grassFloorR.Mesh = cubeMesh;
-	grassFloorR.Material = grassMat;
-	Collider grassFloorC = grassFloor.Add<Collider>();
-	grassFloorC.SimpleGeometry = true;
+	MeshRenderer floorRenderer = floor.Add<MeshRenderer>();
+	floorRenderer.Mesh = cubeMesh;
+	floorRenderer.Material = basicMat;
 
-	// ==================== Длинная "полоса" из prototype.png ====================
-	// Идёт вдаль по центру коридора. У прототип-текстур обычно есть сетка —
-	// если да, это и есть "сеточка вдали" прямо на геометрии.
-	Entity runway = scene.Add("GridRunway");
-	Transform runwayT = runway.Add<Transform>();
-	runwayT.Position = new DVector3(0, -0.23, -120);
-	runwayT.Scale = new DVector3(40, 0.02, 280); // от Z = +20 до Z = -260
-	MeshRenderer runwayR = runway.Add<MeshRenderer>();
-	runwayR.Mesh = cubeMesh;
-	runwayR.Material = protoMat;
+	Collider floorCollider = floor.Add<Collider>();
+	floorCollider.SimpleGeometry = true;
 
-	// ==================== Боковые стены из images.png ====================
-	for (int side = -1; side <= 1; side += 2)
+	const double floorSize = 50;
+	const double wallHeight = 5;
+	const double wallThickness = 1;
+
+	double offset = floorSize / 2 + wallThickness / 2;
+	double wallCenterY = wallHeight / 2 + 0.5;
+
+	(string name, DVector3 pos, DVector3 scale)[] walls =
+	[
+		("WallNorth", new DVector3(0, wallCenterY,  offset), new DVector3(floorSize + wallThickness * 2, wallHeight, wallThickness)),
+		("WallSouth", new DVector3(0, wallCenterY, -offset), new DVector3(floorSize + wallThickness * 2, wallHeight, wallThickness)),
+		("WallEast",  new DVector3( offset, wallCenterY, 0), new DVector3(wallThickness, wallHeight, floorSize)),
+		("WallWest",  new DVector3(-offset, wallCenterY, 0), new DVector3(wallThickness, wallHeight, floorSize)),
+	];
+
+	foreach (var (name, pos, scale) in walls)
 	{
-		Entity wall = scene.Add($"Wall_{(side < 0 ? "L" : "R")}");
-		Transform wallT = wall.Add<Transform>();
-		wallT.Position = new DVector3(side * 20, 5, -120);
-		wallT.Scale = new DVector3(0.5, 10, 280);
-		MeshRenderer wallR = wall.Add<MeshRenderer>();
-		wallR.Mesh = cubeMesh;
-		wallR.Material = imagesMat;
-		Collider wallC = wall.Add<Collider>();
-		wallC.SimpleGeometry = true;
+		Entity wall = scene.Add(name);
+
+		Transform wallTransform = wall.Add<Transform>();
+		wallTransform.Position = pos;
+		wallTransform.Scale = scale;
+
+		MeshRenderer wallRenderer = wall.Add<MeshRenderer>();
+		wallRenderer.Mesh = cubeMesh;
+		wallRenderer.Material = basicMat;
+
+		Collider wallCollider = wall.Add<Collider>();
+		wallCollider.SimpleGeometry = true;
 	}
 
-	// ==================== Дальняя стена из prototype.png ====================
-	Entity farWall = scene.Add("FarWall");
-	Transform farWallT = farWall.Add<Transform>();
-	farWallT.Position = new DVector3(0, 10, -260);
-	farWallT.Scale = new DVector3(50, 25, 0.5);
-	MeshRenderer farWallR = farWall.Add<MeshRenderer>();
-	farWallR.Mesh = cubeMesh;
-	farWallR.Material = protoMat;
-
-	// ==================== Процедурная шахматка вдали ====================
-	// Эталонный тест "сеточки вдали", не зависящий от содержимого текстуры.
-	// 10 колонок x 20 рядов по 4 юнита = 40 x 80 юнитов, на Z = -100..-180.
-	const int gridCols = 10;
-	const int gridRows = 20;
-	const double tileSize = 4.0;
-	const double gridStartZ = -100.0;
-	const double gridY = -0.20;
-
-	int checkerCount = 0;
-	for (int row = 0; row < gridRows; row++)
-	{
-		for (int col = 0; col < gridCols; col++)
-		{
-			bool isDark = (row + col) % 2 == 0;
-			Material mat = isDark ? blackTile : whiteTile;
-
-			Entity tile = scene.Add($"Checker_{row:00}_{col:00}");
-			Transform tileT = tile.Add<Transform>();
-			tileT.Position = new DVector3(
-				(col - (gridCols - 1) * 0.5) * tileSize,
-				gridY,
-				gridStartZ - row * tileSize);
-			tileT.Scale = new DVector3(tileSize, 0.02, tileSize);
-
-			MeshRenderer tileR = tile.Add<MeshRenderer>();
-			tileR.Mesh = cubeMesh;
-			tileR.Material = mat;
-			checkerCount++;
-		}
-	}
-
-	// ==================== Опорные плоскости вдали (все три текстуры) ====================
-	// 9 плоскостей, уходящих вдаль, чередуя текстуры. Размер растёт с дистанцией,
-	// чтобы на экране они занимали похожую площадь — удобно сравнивать мип-переходы.
-	const int refPlaneCount = 9;
-	const double refStartZ = -5.0;
-	const double refSpacing = 6.0;
-	const double refBaseSize = 2.0;
-
-	for (int i = 0; i < refPlaneCount; i++)
-	{
-		Entity p = scene.Add($"RefPlane_{i:00}");
-		Transform pT = p.Add<Transform>();
-		double size = refBaseSize + i * 1.2;
-		pT.Position = new DVector3(
-			(i % 3 - 1) * 7.0,
-			size * 0.5 + 0.2,
-			refStartZ - i * refSpacing);
-		pT.Scale = new DVector3(size, size, 0.05);
-
-		MeshRenderer pR = p.Add<MeshRenderer>();
-		pR.Mesh = cubeMesh;
-		pR.Material = texturedMats[i % 3];
-	}
-
-	// ==================== Ближние опорные плоскости (по одной на текстуру) ====================
-	for (int i = 0; i < 3; i++)
-	{
-		Entity p = scene.Add($"CloseRef_{i}");
-		Transform pT = p.Add<Transform>();
-		pT.Position = new DVector3(-4.0 + i * 4.0, 1.5, 6.0);
-		pT.Scale = new DVector3(2.0, 2.0, 0.05);
-
-		MeshRenderer pR = p.Add<MeshRenderer>();
-		pR.Mesh = cubeMesh;
-		pR.Material = texturedMats[i];
-	}
-
-	// ==================== Декоративные колонны вдоль коридора ====================
-	// Нагрузка текстурами: 20 колонн с чередующимися текстурами.
-	for (int i = 0; i < 10; i++)
-	{
-		for (int side = -1; side <= 1; side += 2)
-		{
-			Entity p = scene.Add($"Pillar_{i:00}_{(side < 0 ? "L" : "R")}");
-			Transform pT = p.Add<Transform>();
-			pT.Position = new DVector3(side * 14, 3, -20 - i * 22);
-			pT.Scale = new DVector3(1.5, 6, 1.5);
-
-			MeshRenderer pR = p.Add<MeshRenderer>();
-			pR.Mesh = cubeMesh;
-			pR.Material = texturedMats[(i + (side > 0 ? 1 : 0)) % 3];
-		}
-	}
-
-	// ==================== Игрок ====================
+	// Player
 	Entity playerEntity = scene.Add("Player");
 
 	Transform playerTransform = playerEntity.Add<Transform>();
@@ -282,7 +175,7 @@ try
 	playerBody.UseGravity = true;
 	playerBody.FreezeRotation = true;
 
-	// ==================== Камера ====================
+	// Camera
 	Entity cameraEntity = scene.Add("Camera");
 	cameraEntity.Add<Transform>();
 
@@ -302,18 +195,6 @@ try
 		jumpSpeed: 7.0,
 		mouseSensitivity: 0.15,
 		eyeHeight: 0.62);
-
-	Console.WriteLine("Mipmap stress test ready.");
-
-	Console.WriteLine(
-		"WASD: move | Space: jump | Mouse: look | " +
-		"Esc: release mouse | Left click: recapture | F11: fullscreen");
-
-	Console.WriteLine(
-		$"Textures: grass.png + images.png + prototype.png | " +
-		$"Checkerboard tiles: {checkerCount} | " +
-		$"Dynamic bodies: {physics.BodyCount} | " +
-		$"Colliders: {physics.ColliderCount}");
 
 	System.Diagnostics.Stopwatch stopwatch =
 		System.Diagnostics.Stopwatch.StartNew();
