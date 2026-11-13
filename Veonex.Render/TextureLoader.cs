@@ -1,3 +1,4 @@
+
 using NeoVeldrid;
 using Veonex.Assets;
 
@@ -10,7 +11,11 @@ public static class TextureLoader
 		GraphicsDevice graphicsDevice,
 		string path)
 	{
-		return Load(factory, graphicsDevice, path, out _);
+		return Load(
+			factory,
+			graphicsDevice,
+			path,
+			out _);
 	}
 
 	public static Texture Load(
@@ -19,9 +24,6 @@ public static class TextureLoader
 		string path,
 		out bool hasAlpha)
 	{
-		ArgumentNullException.ThrowIfNull(factory);
-		ArgumentNullException.ThrowIfNull(graphicsDevice);
-
 		Texture texture = LoadCore(
 			factory,
 			graphicsDevice,
@@ -30,6 +32,7 @@ public static class TextureLoader
 			out _);
 
 		graphicsDevice.WaitForIdle();
+
 		return texture;
 	}
 
@@ -39,7 +42,13 @@ public static class TextureLoader
 		CommandList commandList,
 		string path)
 	{
-		return Load(factory, graphicsDevice, commandList, path, out _, out _);
+		return Load(
+			factory,
+			graphicsDevice,
+			commandList,
+			path,
+			out _,
+			out _);
 	}
 
 	public static Texture Load(
@@ -49,7 +58,13 @@ public static class TextureLoader
 		string path,
 		out bool hasAlpha)
 	{
-		return Load(factory, graphicsDevice, commandList, path, out hasAlpha, out _);
+		return Load(
+			factory,
+			graphicsDevice,
+			commandList,
+			path,
+			out hasAlpha,
+			out _);
 	}
 
 	public static Texture Load(
@@ -60,8 +75,6 @@ public static class TextureLoader
 		out bool hasAlpha,
 		out int mipLevels)
 	{
-		ArgumentNullException.ThrowIfNull(factory);
-		ArgumentNullException.ThrowIfNull(graphicsDevice);
 		ArgumentNullException.ThrowIfNull(commandList);
 
 		return LoadCore(
@@ -79,16 +92,21 @@ public static class TextureLoader
 		out bool hasAlpha,
 		out int mipLevels)
 	{
-		string fullPath = Path.GetFullPath(path);
-		DecodedImage image = ImageDecoder.Load(fullPath);
+		ArgumentNullException.ThrowIfNull(factory);
+		ArgumentNullException.ThrowIfNull(graphicsDevice);
+
+		if (string.IsNullOrWhiteSpace(path))
+			throw new ArgumentException("Texture path cannot be empty.", nameof(path));
+
+		DecodedImage image = ImageDecoder.Load(path);
 
 		hasAlpha = image.HasAlpha;
 
-		return Ktx2.Load(
+		return TextureProcessor.CreateTexture(
 			factory,
 			graphicsDevice,
 			image,
-			fullPath,
+			path,
 			out mipLevels);
 	}
 }
