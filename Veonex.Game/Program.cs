@@ -57,6 +57,14 @@ try
 		position: new DVector2(6.0, 36.0),
 		size: new DVector2(900.0, 48.0));
 
+	Element positionLabel = TextPrefab.Create(
+		name: "PositionStats",
+		content: string.Empty,
+		fontPath: fontPath,
+		fontSize: 12.0,
+		position: new DVector2(6.0, 72.0),
+		size: new DVector2(196.0, 48.0));
+
 	Element consoleLabel = TextPrefab.Create(
 		name: "Console",
 		content: "Veonex Console",
@@ -73,6 +81,7 @@ try
 
 	uiDocument.Root.AddChild(counter);
 	uiDocument.Root.AddChild(renderStatsLabel);
+	uiDocument.Root.AddChild(positionLabel);
 	uiDocument.Root.AddChild(consoleLabel);
 
 	Scene scene = new();
@@ -87,13 +96,17 @@ try
 	light.Color = new DVector3(1.0, 1.0, 1.0);
 	light.Intensity = 1.0;
 
-	physics.Gravity = new DVector3(0.0, -9.81, 0.0);
+	physics.Gravity = new DVector3(0.0, -9.81, -100.0);
 
 	Mesh cubeMesh = CubeMeshTemplate.Create();
 
 	const string texBasic = "assets/textures/prototype.png";
 
-	Material basicMat = new("Basic", "Basic", new DVector4(1, 1, 1, 1), texBasic);
+	Material basicMat = new("Basic", "Basic", 
+		new DVector4(1, 1, 1, 1), 
+		texBasic, 
+		textureTiling: true, 
+		tiling: new DVector2(20.0, 20.0));
 
 	Material[] texturedMats = [basicMat];
 
@@ -252,6 +265,8 @@ try
 			if (consoleLines.Count > MaxConsoleLines)
 				consoleLines.RemoveAt(0);
 		}
+
+		positionLabel.Get<Text>().Content = playerTransform.Position.ToString();
 
 		consoleLabel.Get<Text>().Content = consoleLines.Count == 0
 			? "Veonex Console"
