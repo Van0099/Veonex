@@ -441,12 +441,16 @@ public sealed unsafe class RenderBackend : IDisposable
 		public Vector4 AlbedoColor;
 		public Vector4 EmissionColor;
 		public Vector4 Parameters;
+		public Vector4 TextureTransform;
 
 		public MaterialBuffer(
 			Vector4 albedoColor,
 			float opacity,
 			Vector4 emissionColor,
-			float emissionStrength)
+			float emissionStrength,
+			bool textureTiling,
+			Vector2 tiling,
+			Vector2 offset)
 		{
 			AlbedoColor = albedoColor;
 			EmissionColor = emissionColor;
@@ -454,8 +458,14 @@ public sealed unsafe class RenderBackend : IDisposable
 			Parameters = new Vector4(
 				opacity,
 				emissionStrength,
-				0f,
+				textureTiling ? 1f : 0f,
 				0f);
+
+			TextureTransform = new Vector4(
+				tiling.X,
+				tiling.Y,
+				offset.X,
+				offset.Y);
 		}
 	}
 
@@ -2301,13 +2311,25 @@ public sealed unsafe class RenderBackend : IDisposable
 			(float)material.EmissionColor.Z,
 			(float)material.EmissionColor.W);
 
+		Vector2 tiling = new(
+			(float)material.Tiling.X,
+			(float)material.Tiling.Y);
+
+		Vector2 offset = new(
+			(float)material.Offset.X,
+			(float)material.Offset.Y);
+
 		_graphicsDevice.UpdateBuffer(
-			resources.Buffer, 0,
+			resources.Buffer,
+			0,
 			new MaterialBuffer(
 				albedoColor,
 				(float)material.Opacity,
 				emissionColor,
-				(float)material.EmissionStrength));
+				(float)material.EmissionStrength,
+				material.TextureTiling,
+				tiling,
+				offset));
 
 		_commandList.SetGraphicsResourceSet(1, resources.ResourceSet);
 	}

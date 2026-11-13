@@ -1,4 +1,3 @@
-
 ###VERT
 #version 450
 
@@ -50,6 +49,7 @@ void main()
 }
 
 ###FRAG
+
 #version 450
 
 layout(set = 1, binding = 0) uniform MaterialBuffer
@@ -57,6 +57,7 @@ layout(set = 1, binding = 0) uniform MaterialBuffer
     vec4 AlbedoColor;
     vec4 EmissionColor;
     vec4 MaterialParameters;
+    vec4 TextureTransform;
 };
 
 layout(set = 1, binding = 1) uniform texture2D AlbedoTexture;
@@ -143,9 +144,14 @@ void main()
         LightColorIntensity.a *
         shadow;
 
+    vec2 uv = FragUV;
+
+    if (MaterialParameters.z > 0.5)
+        uv = uv * TextureTransform.xy + TextureTransform.zw;
+
     vec4 textureColor = texture(
         sampler2D(AlbedoTexture, AlbedoSampler),
-        FragUV);
+        uv);
 
     vec4 finalColor = textureColor * AlbedoColor;
 
