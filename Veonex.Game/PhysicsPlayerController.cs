@@ -350,7 +350,8 @@ public sealed class PhysicsPlayerController
 
 		// Do not treat the player as grounded while they are already
 		// moving upwards. This helps prevent repeated jumps on one landing.
-		bool grounded = true;
+		bool grounded = _physics.IsGrounded(_player) &&
+						currentVelocity.Y <= 0.05;
 
 		if (grounded)
 		{

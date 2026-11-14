@@ -16,8 +16,8 @@ WindowParameters parameters = new()
 {
 	Width = 1920,
 	Height = 1080,
-	Title = "Veonex - Mipmap Stress Test",
-	VSync = true,
+	Title = "Veonex Game",
+	VSync = false,
 	Resizable = true,
 	Fullscreen = true
 };
@@ -127,7 +127,7 @@ try
 	Entity floor = scene.Add("Floor");
 	Transform floorTransform = floor.Add<Transform>();
 	floorTransform.Position = DVector3.Zero;
-	floorTransform.Scale = new DVector3(50, 1, 50);
+	floorTransform.Scale = new DVector3(1000, 1, 1000);
 
 	MeshRenderer floorRenderer = floor.Add<MeshRenderer>();
 	floorRenderer.Mesh = cubeMesh;
@@ -165,6 +165,7 @@ try
 
 		Collider wallCollider = wall.Add<Collider>();
 		wallCollider.SimpleGeometry = true;
+		wallCollider.SizePercent = new DVector3(0.1, 0.1, 0.1);
 	}
 
 	Entity rampEntity = scene.Add("Ramp");
