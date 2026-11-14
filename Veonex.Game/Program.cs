@@ -127,7 +127,7 @@ try
 	Entity floor = scene.Add("Floor");
 	Transform floorTransform = floor.Add<Transform>();
 	floorTransform.Position = DVector3.Zero;
-	floorTransform.Scale = new DVector3(1000, 1, 1000);
+	floorTransform.Scale = new DVector3(50, 1, 50);
 
 	MeshRenderer floorRenderer = floor.Add<MeshRenderer>();
 	floorRenderer.Mesh = cubeMesh;
@@ -165,7 +165,6 @@ try
 
 		Collider wallCollider = wall.Add<Collider>();
 		wallCollider.SimpleGeometry = true;
-		wallCollider.SizePercent = new DVector3(0.1, 0.1, 0.1);
 	}
 
 	Entity rampEntity = scene.Add("Ramp");
